@@ -1,0 +1,83 @@
+import { describe, it, expect } from "vitest";
+import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
+// Migration tooling is plain Node so the same source runs without a TS build.
+// @ts-expect-error the migration module intentionally has no build dependency
+import { normalize, toSql } from "../scripts/normalize.mjs";
+const snapshot = (
+  extra: { path: string; data: Record<string, unknown> }[] = [],
+) => ({
+  project: "juku-attendance",
+  exportedAt: "2026-10-28T00:00:00Z",
+  documents: [
+    {
+      path: "students/list",
+      data: { names: ["架空生徒"], yomiMap: { 架空生徒: "かくうせいと" } },
+    },
+    { path: "attendance/架空生徒/202611/2026-10-31", data: { "1限": true } },
+    { path: "holidays/202611", data: { "2026-11-02": true } },
+    { path: "temporaryDays/202611", data: { "2026-11-01": true } },
+    { path: "temporaryDays2/202611", data: { "2026-11-01": true } },
+    ...extra,
+  ],
+});
+describe("旧日付の正規化", () => {
+  it("前月末キーを本来の翌月初へ変換", () => {
+    const data = normalize(snapshot(), "2026-07-28");
+    expect(data.tables.reservations[0].date).toBe("2026-11-01");
+    expect(
+      data.tables.calendar.find(
+        (d: { date: string }) => d.date === "2026-11-02",
+      ).pattern,
+    ).toBe("temporary2");
+  });
+  it("親の月と一致しないレコードは推測せず停止", () => {
+    expect(() =>
+      normalize(
+        snapshot([
+          {
+            path: "attendance/架空生徒/202611/2026-11-30",
+            data: { "1限": true },
+          },
+        ]),
+        "2026-07-28",
+      ),
+    ).toThrow("month/date conflict");
+  });
+  it("全量置換は削除済み予約も消し、実SQLで再実行可能", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(readFileSync("migrations/0001_initial.sql", "utf8"));
+    const initial = normalize(snapshot(), "2026-07-28");
+    db.exec(toSql(initial));
+    db.exec(toSql(initial));
+    expect(db.prepare("SELECT count(*) n FROM reservations").get()?.n).toBe(1);
+    const next = snapshot();
+    next.documents = next.documents.filter(
+      (d: { path: string }) => !d.path.startsWith("attendance/"),
+    );
+    db.exec(toSql(normalize(next, "2026-07-28")));
+    expect(db.prepare("SELECT count(*) n FROM reservations").get()?.n).toBe(0);
+    db.close();
+  });
+  it("予約重複と失敗途中のバッチをDBが防止", () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(readFileSync("migrations/0001_initial.sql", "utf8"));
+    db.exec(toSql(normalize(snapshot(), "2026-07-28")));
+    const row = db.prepare("SELECT * FROM reservations").get()!;
+    expect(() =>
+      db
+        .prepare("INSERT INTO reservations VALUES(?,?,?)")
+        .run(row.student_id!, row.date!, row.period!),
+    ).toThrow();
+    db.exec("BEGIN");
+    try {
+      db.exec("DELETE FROM reservations");
+      db.exec("INSERT INTO write_guards VALUES('conflict',0)");
+      db.exec("COMMIT");
+    } catch {
+      db.exec("ROLLBACK");
+    }
+    expect(db.prepare("SELECT count(*) n FROM reservations").get()?.n).toBe(1);
+    db.close();
+  });
+});

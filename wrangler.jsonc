@@ -1,0 +1,45 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "juku-attendance-system-staging",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-10-23",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/public/v1/*"],
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "attendance",
+      "database_id": "cae6e22d-5465-494b-b0bf-00cc82ea6594",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "vars": {
+    "ENVIRONMENT": "staging",
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 0.1,
+  },
+  "env": {
+    "production": {
+      "name": "juku-attendance-system",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "attendance-production",
+          "database_id": "7f70ea66-6e01-4a38-8bac-2cb72bda1a32",
+          "migrations_dir": "migrations",
+        },
+      ],
+      "vars": {
+        "ENVIRONMENT": "production",
+        "MAINTENANCE": "true",
+      },
+    },
+  },
+}
