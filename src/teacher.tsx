@@ -2,7 +2,14 @@ import DOMPurify from "dompurify";
 import { useEffect, useState } from "react";
 import { api } from "./api";
 import { path, teacherMenu, pageTitle } from "./config";
-import { useAction, useSchedule, MonthSelect, ErrorBox, Status } from "./ui";
+import {
+  useAction,
+  useSchedule,
+  useAttendanceTimeline,
+  MonthSelect,
+  ErrorBox,
+  Status,
+} from "./ui";
 import {
   labels,
   monthDates,
@@ -83,49 +90,52 @@ function TeacherTop() {
 function TeacherAttendance({ past = false }: { past?: boolean }) {
   const s = useSchedule(
     past ? monthOffset(todayJst().slice(0, 7), -1) : todayJst().slice(0, 7),
+    past,
   );
+  const timeline = useAttendanceTimeline(!past, true);
   const a = useAction();
-  const [visible, setVisible] = useState(10);
+  const [visible, setVisible] = useState(14);
   const [modal, setModal] = useState<{ date: string; period: number } | null>(
     null,
   );
   const [changes, setChanges] = useState<Record<string, boolean>>({});
   useEffect(() => {
     setChanges({});
-    setVisible(10);
-  }, [s.data]);
-  const d = s.data;
+    setVisible(14);
+  }, [s.month]);
+  const d = past ? s.data : timeline.schedules[todayJst().slice(0, 7)];
+  const refresh = past ? s.refresh : timeline.refresh;
+  const loading = past ? s.loading : timeline.loading;
   const active = d?.students.filter((x) => x.active === 1) ?? [];
   const present = (studentId: string, date: string, period: number) =>
     changes[`${studentId}:${date}:${period}`] ??
-    d?.reservations.some(
+    (past ? d : timeline.schedules[date.slice(0, 7)])?.reservations.some(
       (r) =>
         r.student_id === studentId && r.date === date && r.period === period,
     ) ??
     false;
-  const dates = monthDates(s.month)
-    .filter(
-      (date) =>
-        past || s.month !== todayJst().slice(0, 7) || date >= todayJst(),
-    )
-    .slice(0, visible);
+  const dates = past ? monthDates(s.month).slice(0, visible) : timeline.dates;
   return (
     <>
       <h1>{past ? "過去一覧" : "出席を確認・編集"}</h1>
-      <MonthSelect
-        past
-        month={s.month}
-        onChange={(m) => {
-          if (
-            !Object.keys(changes).length ||
-            confirm("未保存の変更を破棄しますか？")
-          )
-            s.setMonth(m);
-        }}
-      />
-      <ErrorBox error={s.error} />
-      {s.loading && <p>読み込み中…</p>}
-      {d && !s.loading && (
+      {past ? (
+        <MonthSelect
+          past
+          month={s.month}
+          onChange={(m) => {
+            if (
+              !Object.keys(changes).length ||
+              confirm("未保存の変更を破棄しますか？")
+            )
+              s.setMonth(m);
+          }}
+        />
+      ) : (
+        <a href="/teacher_past.html">非公開月・過去の予定を確認・編集</a>
+      )}
+      <ErrorBox error={past ? s.error : timeline.error} />
+      {loading && <p role="status">読み込み中…</p>}
+      {d && (
         <>
           <div className="table-wrap">
             <table className="attendance-table">
@@ -148,8 +158,10 @@ function TeacherAttendance({ past = false }: { past?: boolean }) {
                       const info = slotInfo(
                         date,
                         period,
-                        d.calendar,
-                        d.subjects,
+                        (past ? d : timeline.schedules[date.slice(0, 7)])
+                          .calendar,
+                        (past ? d : timeline.schedules[date.slice(0, 7)])
+                          .subjects,
                       );
                       const names = active.filter((st) =>
                         present(st.id, date, period),
@@ -163,6 +175,7 @@ function TeacherAttendance({ past = false }: { past?: boolean }) {
                         >
                           <button
                             className="attendance-cell"
+                            disabled={a.busy}
                             onClick={() => setModal({ date, period })}
                           >
                             <small>
@@ -185,32 +198,68 @@ function TeacherAttendance({ past = false }: { past?: boolean }) {
               </tbody>
             </table>
           </div>
-          <button
-            className="secondary more"
-            onClick={() => setVisible((v) => v + 10)}
-          >
-            さらに表示
-          </button>
+          {!dates.length && !loading && (
+            <p className="empty">公開済みの予定はありません。</p>
+          )}
+          {(past ? visible < monthDates(s.month).length : timeline.hasMore) && (
+            <button
+              className="secondary more"
+              disabled={loading || a.busy}
+              onClick={() =>
+                past ? setVisible((v) => v + 14) : timeline.loadMore()
+              }
+            >
+              もっと見る（2週間分）
+            </button>
+          )}
           <div className="fixed-bar">
             <button
-              disabled={a.busy || !Object.keys(changes).length}
+              disabled={a.busy || loading || !Object.keys(changes).length}
               onClick={() =>
                 void a.run(async () => {
-                  await api("/api/teacher/reservations", {
-                    month: s.month,
-                    revision: d.revision,
-                    changes: Object.entries(changes).map(([key, present]) => {
-                      const [studentId, date, period] = key.split(":");
-                      return {
-                        studentId,
-                        date,
-                        period: Number(period),
-                        present,
-                      };
-                    }),
-                  });
+                  const groups: Record<string, [string, boolean][]> = {};
+                  for (const entry of Object.entries(changes))
+                    (groups[entry[0].split(":")[1].slice(0, 7)] ??= []).push(
+                      entry,
+                    );
+                  try {
+                    for (const [month, entries] of Object.entries(groups)) {
+                      let revision = (past ? d : timeline.schedules[month])
+                        .revision;
+                      for (
+                        let offset = 0;
+                        offset < entries!.length;
+                        offset += 300
+                      ) {
+                        const batch = entries!.slice(offset, offset + 300);
+                        await api("/api/teacher/reservations", {
+                          month,
+                          revision,
+                          changes: batch.map(([key, present]) => {
+                            const [studentId, date, period] = key.split(":");
+                            return {
+                              studentId,
+                              date,
+                              period: Number(period),
+                              present,
+                            };
+                          }),
+                        });
+                        revision += 1;
+                        setChanges((current) =>
+                          Object.fromEntries(
+                            Object.entries(current).filter(
+                              ([key]) =>
+                                !batch.some(([saved]) => saved === key),
+                            ),
+                          ),
+                        );
+                      }
+                    }
+                  } finally {
+                    refresh();
+                  }
                   a.setNotice("✓ 保存しました");
-                  s.refresh();
                 })
               }
             >
@@ -233,6 +282,7 @@ function TeacherAttendance({ past = false }: { past?: boolean }) {
                   {active.map((st) => (
                     <button
                       key={st.id}
+                      disabled={a.busy}
                       className={
                         present(st.id, modal.date, modal.period)
                           ? "selected"

@@ -12,8 +12,6 @@ import { api, ApiError, setIdentity } from "./api";
 import {
   addDays,
   labels,
-  monthDates,
-  monthOffset,
   slotInfo,
   todayJst,
   weekday,
@@ -29,7 +27,13 @@ import {
 } from "../shared/domain";
 import "./style.css";
 import { path, teacher, role, rootPage } from "./config";
-import { useAction, useSchedule, MonthSelect, ErrorBox, Status } from "./ui";
+import {
+  useAction,
+  useSchedule,
+  useAttendanceTimeline,
+  ErrorBox,
+  Status,
+} from "./ui";
 const TeacherPage = lazy(() => import("./teacher"));
 const PublicHome = lazy(() =>
   import("./teacher").then((m) => ({ default: m.PublicHome })),
@@ -187,14 +191,10 @@ function StudentSchedule({
   identity: Identity;
   todayOnly?: boolean;
 }) {
-  const s = useSchedule();
-  const [visible, setVisible] = useState(10);
+  const s = useSchedule(undefined, todayOnly);
+  const timeline = useAttendanceTimeline(!todayOnly, false);
   const [pending, setPending] = useState<Set<string>>(new Set());
   const a = useAction();
-  useEffect(() => {
-    setPending(new Set());
-    setVisible(10);
-  }, [s.month, s.data]);
   useEffect(() => {
     if (!pending.size) return;
     const fn = (e: BeforeUnloadEvent) => {
@@ -204,13 +204,11 @@ function StudentSchedule({
     window.addEventListener("beforeunload", fn);
     return () => window.removeEventListener("beforeunload", fn);
   }, [pending]);
-  const d = s.data;
+  const d = todayOnly ? s.data : timeline.schedules[todayJst().slice(0, 7)];
   const today = d?.today ?? todayJst();
-  const dates = todayOnly
-    ? [today]
-    : monthDates(s.month)
-        .filter((date) => date > today)
-        .slice(0, visible);
+  const dates = todayOnly ? [today] : timeline.dates;
+  const loading = todayOnly ? s.loading : timeline.loading;
+  const error = todayOnly ? s.error : timeline.error;
   const weekStart = addDays(today, -((weekday(today) + 6) % 7));
   const count =
     d?.reservations.filter(
@@ -227,15 +225,17 @@ function StudentSchedule({
     });
   }
   function renderSlot(date: string, period: number) {
-    if (!d) return null;
-    const info = slotInfo(date, period, d.calendar, d.subjects);
-    const mine = d.reservations.some(
+    const dayData = todayOnly ? d : timeline.schedules[date.slice(0, 7)];
+    if (!dayData) return null;
+    const info = slotInfo(date, period, dayData.calendar, dayData.subjects);
+    const mine = dayData.reservations.some(
       (r) => r.date === date && r.period === period,
     );
     const key = date + ":" + period;
     const cancelled = pending.has(key);
     const count =
-      d.counts.find((r) => r.date === date && r.period === period)?.count ?? 0;
+      dayData.counts.find((r) => r.date === date && r.period === period)
+        ?.count ?? 0;
     const remaining = Math.max(0, info.capacity - count + (cancelled ? 1 : 0));
     const text = info.closed ? "休み" : info.study ? "自習のみ" : info.subject;
     return (
@@ -259,27 +259,17 @@ function StudentSchedule({
     );
   }
   function dateLabel(date: string) {
-    return `${Number(date.slice(5, 7))}/${Number(date.slice(8))}（${weekdays[weekday(date)]}）`;
+    return `${date.slice(0, 4) !== today.slice(0, 4) ? date.slice(0, 4) + "/" : ""}${Number(date.slice(5, 7))}/${Number(date.slice(8))}（${weekdays[weekday(date)]}）`;
   }
   return (
     <>
       <h1>
         {identity.name}さんの{todayOnly ? "本日の出席" : "出席確認"}
       </h1>
-      {!todayOnly && (
-        <MonthSelect
-          month={s.month}
-          onChange={(m) => {
-            if (!pending.size || confirm("保存していない変更を破棄しますか？"))
-              s.setMonth(m);
-          }}
-        />
-      )}
-      <ErrorBox error={s.error} />
-      {s.loading && <p role="status">読み込み中…</p>}
+      <ErrorBox error={error} />
+      {loading && <p role="status">読み込み中…</p>}
       {d &&
-        !s.loading &&
-        (!d.published ? (
+        (todayOnly && !d.published ? (
           <p className="empty">この月の予定はまだ公開されていません。</p>
         ) : (
           <>
@@ -330,33 +320,52 @@ function StudentSchedule({
             )}
             {!todayOnly && (
               <>
-                {visible <
-                  monthDates(s.month).filter((x) => x > today).length && (
+                {!dates.length && !loading && (
+                  <p className="empty">公開済みの予定はありません。</p>
+                )}
+                {timeline.hasMore && (
                   <button
                     className="secondary more"
-                    onClick={() => setVisible((v) => v + 10)}
+                    disabled={loading || a.busy}
+                    onClick={timeline.loadMore}
                   >
-                    もっと見る
+                    もっと見る（2週間分）
                   </button>
                 )}
                 <div className="fixed-bar">
                   <button
-                    disabled={a.busy}
+                    disabled={a.busy || loading}
                     onClick={() => {
                       if (confirm("この内容で確定しますか？"))
                         void a.run(async () => {
-                          if (pending.size)
-                            await api("/api/student/cancellations", {
-                              month: s.month,
-                              revision: d.revision,
-                              changes: [...pending].map((key) => {
-                                const [date, period] = key.split(":");
-                                return { date, period: Number(period) };
-                              }),
-                            });
-                          setPending(new Set());
+                          const groups: Record<string, string[]> = {};
+                          for (const key of pending)
+                            (groups[key.slice(0, 7)] ??= []).push(key);
+                          try {
+                            for (const [month, keys] of Object.entries(
+                              groups,
+                            )) {
+                              await api("/api/student/cancellations", {
+                                month,
+                                revision: timeline.schedules[month].revision,
+                                changes: keys!.map((key) => {
+                                  const [date, period] = key.split(":");
+                                  return { date, period: Number(period) };
+                                }),
+                              });
+                              setPending(
+                                (current) =>
+                                  new Set(
+                                    [...current].filter(
+                                      (key) => !keys!.includes(key),
+                                    ),
+                                  ),
+                              );
+                            }
+                          } finally {
+                            if (pending.size) timeline.refresh();
+                          }
                           a.setNotice("✓ 出席内容を保存しました");
-                          s.refresh();
                         });
                     }}
                   >

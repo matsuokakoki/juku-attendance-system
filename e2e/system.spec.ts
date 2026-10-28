@@ -5,6 +5,7 @@ import {
   addDays,
   weekday,
   monthOffset,
+  monthDates,
   type Identity,
   type Schedule,
 } from "../shared/domain";
@@ -299,8 +300,6 @@ test("生徒のログインから月別確認・取消まで", async ({ page }) 
   await expect(
     page.getByRole("heading", { name: "山田さんの出席確認" }),
   ).toBeVisible();
-  if (futureMonth !== month)
-    await page.getByLabel("表示する月").selectOption(futureMonth);
   const slot = page.getByRole("button", {
     name: new RegExp(future + " 1限 .*登録済み"),
   });
@@ -380,3 +379,196 @@ test("スマホ画面で横にはみ出さず主要操作が見える", async ({
     fullPage: true,
   });
 });
+
+test("公開済みの未来月は3か月先以降も取得・取消できる", async ({ request }) => {
+  const farMonth = monthOffset(month, 4);
+  let date = farMonth + "-15";
+  if (weekday(date) === 0) date = addDays(date, 1);
+  const teacher = await login(request, "teacher");
+  const getFar = async () =>
+    (await (
+      await request.get("/api/teacher/schedule?month=" + farMonth)
+    ).json()) as Schedule;
+  let far = await getFar();
+  await post(request, "/api/teacher/publication", teacher, {
+    month: farMonth,
+    revision: far.revision,
+    published: true,
+  });
+  far = await getFar();
+  await post(request, "/api/teacher/reservations", teacher, {
+    month: farMonth,
+    revision: far.revision,
+    changes: [{ studentId: "demo-yamada", date, period: 1, present: true }],
+  });
+  const student = await login(request, "student");
+  try {
+    const months = await (
+      await request.get("/api/student/schedule-months")
+    ).json();
+    expect(months.months).toContain(farMonth);
+    const schedule = await (
+      await request.get("/api/student/schedule?month=" + farMonth)
+    ).json();
+    expect(schedule.published).toBe(true);
+    // Pick a weekday so the existing Sunday cancellation rule remains unchanged.
+    if (weekday(date) !== 0) {
+      const cancelled = await post(
+        request,
+        "/api/student/cancellations",
+        student,
+        {
+          month: farMonth,
+          revision: schedule.revision,
+          changes: [{ date, period: 1 }],
+        },
+      );
+      expect(cancelled.ok()).toBe(true);
+    }
+  } finally {
+    far = await getFar();
+    await post(request, "/api/teacher/publication", teacher, {
+      month: farMonth,
+      revision: far.revision,
+      published: false,
+    });
+  }
+  const months = await (
+    await request.get("/api/student/schedule-months")
+  ).json();
+  expect(months.months).not.toContain(farMonth);
+  const hidden = await (
+    await request.get("/api/student/schedule?month=" + farMonth)
+  ).json();
+  expect(hidden.reservations).toEqual([]);
+});
+
+for (const role of ["student", "teacher"] as const) {
+  test(`${role}: 月をまたいで14日ずつ追加し取得済み月を再取得しない`, async ({
+    page,
+  }) => {
+    const base = month;
+    const next = monthOffset(base, 1);
+    const far = monthOffset(base, 3);
+    const requests: Record<string, number> = {};
+    await page.route(`**/api/${role}/schedule-months`, (route) =>
+      route.fulfill({ json: { months: [base, next, far] } }),
+    );
+    await page.route(`**/api/${role}/schedule?*`, (route) => {
+      const m = new URL(route.request().url()).searchParams.get("month")!;
+      requests[m] = (requests[m] ?? 0) + 1;
+      return route.fulfill({
+        json: {
+          month: m,
+          today: todayJst(),
+          published: true,
+          revision: 0,
+          calendar: [],
+          subjects: [],
+          counts: [],
+          templates: [],
+          students: [
+            { id: "demo-yamada", name: "山田", yomi: "やまだ", active: 1 },
+          ],
+          reservations: monthDates(m).map((date) => ({
+            student_id: "demo-yamada",
+            date,
+            period: 1,
+          })),
+        },
+      });
+    });
+    await page.goto(
+      role === "student" ? "/login.html" : "/teachertop_final.html",
+    );
+    if (role === "student")
+      await page.getByLabel("名前", { exact: true }).fill("山田");
+    await page
+      .getByLabel("パスワード", { exact: true })
+      .fill(
+        role === "student"
+          ? secrets.STUDENT_PASSWORD
+          : secrets.TEACHER_PASSWORD,
+      );
+    await page.getByRole("button", { name: "ログイン", exact: true }).click();
+    await page
+      .getByRole("link", {
+        name:
+          role === "student" ? "月別の出席確認・変更" : "📅 出席を確認・編集",
+        exact: true,
+      })
+      .click();
+    const rows = page.locator(
+      role === "student"
+        ? ".student-schedule tbody tr"
+        : ".attendance-table tbody tr",
+    );
+    await expect(rows).toHaveCount(14);
+    const saved: { month: string; changes: unknown[] }[] = [];
+    await page.route(
+      `**/api/${role}/${role === "student" ? "cancellations" : "reservations"}`,
+      (route) => {
+        saved.push(route.request().postDataJSON());
+        return route.fulfill({ json: { ok: true } });
+      },
+    );
+    let firstLabel = "";
+    if (role === "student") {
+      const first = page.locator(".slot.active:not(:disabled)").first();
+      firstLabel = (await first.getAttribute("aria-label"))!.replace(
+        " 取消予定",
+        "",
+      );
+      await first.click();
+    } else {
+      await page.locator(".attendance-cell").first().click();
+      await page.getByRole("button", { name: "山田", exact: true }).click();
+      await page.getByRole("button", { name: "閉じる", exact: true }).click();
+    }
+    await expect(page.getByLabel("表示する月")).toHaveCount(0);
+    await page.getByRole("button", { name: "もっと見る（2週間分）" }).click();
+    await expect(rows).toHaveCount(28);
+    for (let i = 0; i < 5; i++) {
+      const more = page.getByRole("button", { name: "もっと見る（2週間分）" });
+      if (!(await more.count())) break;
+      await more.click();
+      await expect(
+        page
+          .getByRole("status", { name: "" })
+          .filter({ hasText: "読み込み中" }),
+      ).toHaveCount(0);
+    }
+    expect(requests[base]).toBe(1);
+    expect(requests[next]).toBe(1);
+    expect(requests[monthOffset(base, 2)]).toBeUndefined();
+    expect(requests[far]).toBe(1);
+    if (role === "student") {
+      await expect(
+        page.getByRole("button", {
+          name: firstLabel + " 取消予定",
+          exact: true,
+        }),
+      ).toHaveAttribute("aria-pressed", "false");
+      await page.locator(".slot.active:not(:disabled)").last().click();
+      page.once("dialog", (dialog) => dialog.accept());
+    } else {
+      await expect(page.locator(".attendance-cell").first()).toContainText(
+        "0人",
+      );
+      await page.locator(".attendance-cell").last().click();
+      await page.getByRole("button", { name: "山田", exact: true }).click();
+      await page.getByRole("button", { name: "閉じる", exact: true }).click();
+    }
+    await page
+      .getByRole("button", {
+        name: role === "student" ? "✓ この変更を保存する" : "✓ 変更を保存する",
+      })
+      .click();
+    await expect(
+      page.getByRole("status").filter({ hasText: "保存しました" }),
+    ).toBeVisible();
+    expect(saved).toHaveLength(2);
+    expect(saved[0].month).not.toBe(saved[1].month);
+    expect(saved.every((batch) => batch.changes.length === 1)).toBe(true);
+  });
+}

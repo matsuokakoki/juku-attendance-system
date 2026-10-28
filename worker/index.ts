@@ -303,10 +303,7 @@ async function readSchedule(c: Context<AppEnv>, teacher: boolean) {
     c.req.query("month") ?? todayJst().slice(0, 7),
   );
   const today = todayJst();
-  if (
-    !teacher &&
-    (month < today.slice(0, 7) || month > monthOffset(today.slice(0, 7), 2))
-  )
+  if (!teacher && month < today.slice(0, 7))
     fail(403, "この月は表示できません");
   const meta = await c.env.DB.prepare("SELECT * FROM months WHERE month=?")
     .bind(month)
@@ -363,6 +360,16 @@ async function readSchedule(c: Context<AppEnv>, teacher: boolean) {
     templates: templates.results,
   });
 }
+async function publishedScheduleMonths(c: Context<AppEnv>) {
+  const rows = await c.env.DB.prepare(
+    "SELECT month FROM months WHERE published=1 AND month>=? ORDER BY month",
+  )
+    .bind(todayJst().slice(0, 7))
+    .all<{ month: string }>();
+  return c.json({ months: rows.results.map((row) => row.month) });
+}
+app.get("/api/student/schedule-months", publishedScheduleMonths);
+app.get("/api/teacher/schedule-months", publishedScheduleMonths);
 app.get("/api/student/schedule", (c) => readSchedule(c, false));
 app.get("/api/teacher/schedule", async (c) => {
   const month = monthSchema.parse(
@@ -393,7 +400,6 @@ app.post("/api/student/cancellations", async (c) => {
   const today = todayJst();
   if (
     d.month < today.slice(0, 7) ||
-    d.month > monthOffset(today.slice(0, 7), 2) ||
     d.changes.some((s) => s.date <= today || s.date.slice(0, 7) !== d.month)
   )
     fail(403, "変更できる日付ではありません");

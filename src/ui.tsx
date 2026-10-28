@@ -1,7 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "./api";
 import { role } from "./config";
-import { todayJst, monthOffset, type Schedule } from "../shared/domain";
+import {
+  todayJst,
+  monthOffset,
+  monthDates,
+  type Schedule,
+} from "../shared/domain";
 export function ErrorBox({ error }: { error: string }) {
   return error ? (
     <p className="error" role="alert">
@@ -27,13 +32,14 @@ export function useAction() {
   }
   return { busy, error, notice, setNotice, run };
 }
-export function useSchedule(initial = todayJst().slice(0, 7)) {
+export function useSchedule(initial = todayJst().slice(0, 7), enabled = true) {
   const [month, setMonth] = useState(initial);
   const [data, setData] = useState<Schedule | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [revision, refresh] = useState(0);
   useEffect(() => {
+    if (!enabled) return;
     let current = true;
     setLoading(true);
     setError("");
@@ -50,7 +56,7 @@ export function useSchedule(initial = todayJst().slice(0, 7)) {
     return () => {
       current = false;
     };
-  }, [month, revision]);
+  }, [month, revision, enabled]);
   return {
     month,
     setMonth,
@@ -98,4 +104,77 @@ export function Status({ a }: { a: ReturnType<typeof useAction> }) {
       )}
     </>
   );
+}
+
+// Month payloads are cached; expanding the list only fetches newly needed months.
+export function useAttendanceTimeline(enabled: boolean, includeToday: boolean) {
+  const [limit, setLimit] = useState(14);
+  const [revision, setRevision] = useState(0);
+  const [schedules, setSchedules] = useState<Record<string, Schedule>>({});
+  const [dates, setDates] = useState<string[]>([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(enabled);
+  const [error, setError] = useState("");
+  const cache = useRef<{
+    revision: number;
+    months: string[];
+    schedules: Record<string, Schedule>;
+  } | null>(null);
+  useEffect(() => {
+    if (!enabled) return;
+    let current = true;
+    setLoading(true);
+    setError("");
+    async function load() {
+      const previous =
+        cache.current?.revision === revision ? cache.current : null;
+      const months =
+        previous?.months ??
+        (await api<{ months: string[] }>(`/api/${role}/schedule-months`))
+          .months;
+      if (!current) return;
+      const today = todayJst();
+      const allDates = months
+        .flatMap(monthDates)
+        .filter((date) => (includeToday ? date >= today : date > today));
+      const nextDates = allDates.slice(0, limit);
+      const next = { ...(previous?.schedules ?? {}) };
+      const needed = [
+        ...new Set([
+          today.slice(0, 7),
+          ...nextDates.map((date) => date.slice(0, 7)),
+        ]),
+      ].filter((month) => !next[month]);
+      const loaded = await Promise.all(
+        needed.map((month) =>
+          api<Schedule>(`/api/${role}/schedule?month=${month}`),
+        ),
+      );
+      for (const schedule of loaded) next[schedule.month] = schedule;
+      if (!current) return;
+      cache.current = { revision, months, schedules: next };
+      setSchedules(next);
+      setDates(nextDates.filter((date) => next[date.slice(0, 7)]?.published));
+      setHasMore(allDates.length > limit);
+    }
+    void load()
+      .catch((e) => {
+        if (current) setError(e.message);
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [enabled, includeToday, limit, revision]);
+  return {
+    schedules,
+    dates,
+    hasMore,
+    loading,
+    error,
+    loadMore: () => setLimit((v) => v + 14),
+    refresh: () => setRevision((v) => v + 1),
+  };
 }
