@@ -360,6 +360,21 @@ test("スマホ画面で横にはみ出さず主要操作が見える", async ({
       () => document.documentElement.scrollWidth <= window.innerWidth,
     ),
   ).toBe(true);
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    const table = page.locator(".student-schedule");
+    await expect(table).toBeVisible();
+    expect(
+      await page
+        .locator(".student-schedule-wrap")
+        .evaluate((element) => element.scrollWidth <= element.clientWidth),
+    ).toBe(true);
+    const lastColumn = await table
+      .getByRole("columnheader", { name: "6限" })
+      .boundingBox();
+    expect(lastColumn).not.toBeNull();
+    expect(lastColumn!.x + lastColumn!.width).toBeLessThanOrEqual(width);
+  }
   await page.screenshot({
     path: "test-results/student-mobile.png",
     fullPage: true,

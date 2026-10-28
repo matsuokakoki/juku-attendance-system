@@ -468,7 +468,7 @@ footer {
   max-width: 100%;
 }
 .student-schedule {
-  min-width: 640px;
+  min-width: 0;
   table-layout: fixed;
   border-collapse: separate;
   border-spacing: 0;
@@ -525,4 +525,24 @@ footer {
 }
 .student-schedule .slot b {
   min-height: 21px;
+}
+
+@media (max-width: 640px) {
+  .student-schedule th:first-child {
+    width: 52px;
+    padding: 8px 2px;
+    font-size: 12px;
+  }
+  .student-schedule thead th {
+    padding: 10px 1px;
+    font-size: 12px;
+  }
+  .student-schedule .slot {
+    min-height: 82px;
+    padding: 6px 1px;
+    font-size: 12px;
+  }
+  .student-schedule .slot small {
+    font-size: 11px;
+  }
 }

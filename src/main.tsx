@@ -296,9 +296,8 @@ function StudentSchedule({
             ) : (
               <div
                 className="table-wrap student-schedule-wrap"
-                tabIndex={0}
                 role="region"
-                aria-label="月別の出席予定。横にスクロールできます"
+                aria-label="月別の出席予定"
               >
                 <table className="student-schedule" aria-label="月別の出席予定">
                   <thead>
