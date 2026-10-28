@@ -236,6 +236,7 @@ function StudentSchedule({
     const cancelled = pending.has(key);
     const count =
       d.counts.find((r) => r.date === date && r.period === period)?.count ?? 0;
+    const remaining = Math.max(0, info.capacity - count + (cancelled ? 1 : 0));
     const text = info.closed ? "休み" : info.study ? "自習のみ" : info.subject;
     return (
       <button
@@ -250,11 +251,10 @@ function StudentSchedule({
         {todayOnly && <span>{period}限</span>}
         <strong>{text}</strong>
         {!info.closed && !info.study && (
-          <small>
-            残{Math.max(0, info.capacity - count + (cancelled ? 1 : 0))}席
+          <small aria-label={`残り${remaining}席`}>
+            {todayOnly ? `残${remaining}席` : remaining}
           </small>
         )}
-        <b>{mine ? (cancelled ? "✕" : "〇") : ""}</b>
       </button>
     );
   }
@@ -313,7 +313,12 @@ function StudentSchedule({
                   <tbody>
                     {dates.map((date) => (
                       <tr key={date}>
-                        <th scope="row">{dateLabel(date)}</th>
+                        <th scope="row">
+                          <div className="schedule-date">
+                            <span>{dateLabel(date)}</span>
+                            <small>残</small>
+                          </div>
+                        </th>
                         {Array.from({ length: 6 }, (_, i) => (
                           <td key={i}>{renderSlot(date, i + 1)}</td>
                         ))}

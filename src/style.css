@@ -241,9 +241,6 @@ textarea {
 .slot small {
   font-size: 12px;
 }
-.slot b {
-  min-height: 20px;
-}
 .day-card-today {
   max-width: 680px;
   margin-inline: auto;
@@ -263,9 +260,6 @@ textarea {
 }
 .day-card-today .slot small {
   font-size: 14px;
-}
-.day-card-today .slot b:empty {
-  display: none;
 }
 .day-card-today .slot.rest {
   background: #ffdddd;
@@ -498,6 +492,8 @@ footer {
   line-height: 1.4;
 }
 .student-schedule .slot {
+  display: grid;
+  grid-template-rows: 1fr 22px;
   width: 100%;
   min-height: 94px;
   height: 100%;
@@ -523,9 +519,6 @@ footer {
 .student-schedule .slot small {
   font-size: 14px;
 }
-.student-schedule .slot b {
-  min-height: 21px;
-}
 
 @media (max-width: 640px) {
   .student-schedule th:first-child {
@@ -543,6 +536,33 @@ footer {
     font-size: 12px;
   }
   .student-schedule .slot small {
+    font-size: 11px;
+  }
+}
+
+.student-schedule tbody th:first-child {
+  padding: 0;
+}
+.schedule-date {
+  display: grid;
+  grid-template-rows: 1fr 22px;
+  align-items: center;
+  min-height: 94px;
+  padding: 10px 5px;
+}
+.schedule-date small {
+  font-size: 14px;
+  font-weight: 500;
+}
+.student-schedule .slot strong:only-child {
+  grid-row: 1 / -1;
+}
+@media (max-width: 640px) {
+  .schedule-date {
+    min-height: 82px;
+    padding: 8px 2px;
+  }
+  .schedule-date small {
     font-size: 11px;
   }
 }
