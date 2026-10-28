@@ -89,6 +89,9 @@ async function commit(
   const g = await guard(c, month, revision);
   try {
     await c.env.DB.batch([
+      c.env.DB.prepare("INSERT OR IGNORE INTO months(month) VALUES(?)").bind(
+        month,
+      ),
       g.first,
       ...queries,
       c.env.DB.prepare(
@@ -309,6 +312,47 @@ async function readSchedule(c: Context<AppEnv>, teacher: boolean) {
   const today = todayJst();
   if (!teacher && month < today.slice(0, 7))
     fail(403, "この月は表示できません");
+  const requestedScope = teacher ? (c.req.query("scope") ?? "all") : "all";
+  if (
+    !["all", "calendar", "subjects", "templates", "publication"].includes(
+      requestedScope,
+    )
+  )
+    fail(400, "取得項目が正しくありません");
+  if (teacher && requestedScope !== "all") {
+    const queries = [
+      c.env.DB.prepare(
+        "SELECT published,revision FROM months WHERE month=?",
+      ).bind(month),
+    ];
+    if (requestedScope === "calendar")
+      queries.push(
+        c.env.DB.prepare(
+          "SELECT * FROM calendar WHERE date>=? AND date<? ORDER BY date",
+        ).bind(month + "-01", monthOffset(month, 1) + "-01"),
+      );
+    if (requestedScope === "subjects")
+      queries.push(c.env.DB.prepare("SELECT * FROM subjects"));
+    if (requestedScope === "templates")
+      queries.push(
+        c.env.DB.prepare("SELECT * FROM templates WHERE month=?").bind(month),
+      );
+    const results = await c.env.DB.batch(queries);
+    const meta = results[0].results[0] as
+      { published: number; revision: number } | undefined;
+    return c.json({
+      month,
+      today,
+      published: !!meta?.published,
+      revision: meta?.revision ?? 0,
+      calendar: requestedScope === "calendar" ? results[1].results : [],
+      subjects: requestedScope === "subjects" ? results[1].results : [],
+      templates: requestedScope === "templates" ? results[1].results : [],
+      reservations: [],
+      counts: [],
+      students: [],
+    });
+  }
   const meta = await c.env.DB.prepare("SELECT * FROM months WHERE month=?")
     .bind(month)
     .first<{ published: number; revision: number }>();
@@ -507,15 +551,7 @@ async function publishedScheduleMonths(c: Context<AppEnv>) {
 app.get("/api/student/schedule-months", publishedScheduleMonths);
 app.get("/api/teacher/schedule-months", publishedScheduleMonths);
 app.get("/api/student/schedule", (c) => readSchedule(c, false));
-app.get("/api/teacher/schedule", async (c) => {
-  const month = monthSchema.parse(
-    c.req.query("month") ?? todayJst().slice(0, 7),
-  );
-  await c.env.DB.prepare("INSERT OR IGNORE INTO months(month) VALUES(?)")
-    .bind(month)
-    .run();
-  return readSchedule(c, true);
-});
+app.get("/api/teacher/schedule", (c) => readSchedule(c, true));
 const changesSchema = z.object({
   month: monthSchema,
   revision: z.number().int().nonnegative(),
@@ -527,25 +563,23 @@ const changesSchema = z.object({
 app.post("/api/student/cancellations", async (c) => {
   const d = await body(c, changesSchema);
   const id = c.get("identity").studentId!;
-  const meta = await c.env.DB.prepare(
-    "SELECT published FROM months WHERE month=?",
-  )
-    .bind(d.month)
-    .first<{ published: number }>();
-  if (!meta?.published) fail(403, "この月は公開されていません");
   const today = todayJst();
   if (
     d.month < today.slice(0, 7) ||
     d.changes.some((s) => s.date <= today || s.date.slice(0, 7) !== d.month)
   )
     fail(403, "変更できる日付ではありません");
-  const [cal, sub] = await c.env.DB.batch([
-    c.env.DB.prepare("SELECT * FROM calendar WHERE date>=? AND date<?").bind(
-      d.month + "-01",
-      monthOffset(d.month, 1) + "-01",
+  const [meta, cal, sub] = await c.env.DB.batch([
+    c.env.DB.prepare("SELECT published FROM months WHERE month=?").bind(
+      d.month,
     ),
+    c.env.DB.prepare(
+      "SELECT * FROM calendar WHERE date IN (SELECT json_extract(value,'$.date') FROM json_each(?))",
+    ).bind(JSON.stringify(d.changes)),
     c.env.DB.prepare("SELECT * FROM subjects"),
   ]);
+  if (!(meta.results[0] as { published: number } | undefined)?.published)
+    fail(403, "この月は公開されていません");
   if (
     d.changes.some((s) => {
       const info = slotInfo(
@@ -558,16 +592,16 @@ app.post("/api/student/cancellations", async (c) => {
     })
   )
     fail(403, "変更できるコマではありません");
-  const queries = d.changes.map((s) =>
+  const queries = [
     c.env.DB.prepare(
-      "DELETE FROM reservations WHERE student_id=? AND date=? AND period=?",
-    ).bind(id, s.date, s.period),
-  );
+      "DELETE FROM reservations WHERE student_id=? AND (date,period) IN (SELECT json_extract(value,'$.date'),json_extract(value,'$.period') FROM json_each(?))",
+    ).bind(id, JSON.stringify(d.changes)),
+  ];
   queries.push(
     await audit(c, "cancel", { month: d.month, changes: d.changes }),
   );
   await commit(c, d.month, d.revision, queries);
-  return c.json({ ok: true });
+  return c.json({ ok: true, revision: d.revision + 1 });
 });
 app.post("/api/teacher/reservations", async (c) => {
   const d = await body(
@@ -596,18 +630,26 @@ app.post("/api/teacher/reservations", async (c) => {
   ).results;
   if (d.changes.some((s) => !students.some((t) => t.id === s.studentId)))
     fail(400, "生徒が登録されていません");
-  const queries = d.changes.map((s) =>
-    s.present
-      ? c.env.DB.prepare(
-          "INSERT OR IGNORE INTO reservations(student_id,date,period) VALUES(?,?,?)",
-        ).bind(s.studentId, s.date, s.period)
-      : c.env.DB.prepare(
-          "DELETE FROM reservations WHERE student_id=? AND date=? AND period=?",
-        ).bind(s.studentId, s.date, s.period),
-  );
+  const changes = [
+    ...new Map(
+      d.changes.map((row) => [
+        `${row.studentId}:${row.date}:${row.period}`,
+        row,
+      ]),
+    ).values(),
+  ];
+  const encoded = JSON.stringify(changes);
+  const queries = [
+    c.env.DB.prepare(
+      "INSERT OR IGNORE INTO reservations(student_id,date,period) SELECT json_extract(value,'$.studentId'),json_extract(value,'$.date'),json_extract(value,'$.period') FROM json_each(?) WHERE json_extract(value,'$.present')=1",
+    ).bind(encoded),
+    c.env.DB.prepare(
+      "DELETE FROM reservations WHERE (student_id,date,period) IN (SELECT json_extract(value,'$.studentId'),json_extract(value,'$.date'),json_extract(value,'$.period') FROM json_each(?) WHERE json_extract(value,'$.present')=0)",
+    ).bind(encoded),
+  ];
   queries.push(await audit(c, "teacher_reservations", d));
   await commit(c, d.month, d.revision, queries);
-  return c.json({ ok: true });
+  return c.json({ ok: true, revision: d.revision + 1 });
 });
 app.post("/api/teacher/calendar", async (c) => {
   const d = await body(
@@ -630,14 +672,12 @@ app.post("/api/teacher/calendar", async (c) => {
   if (d.days.some((s) => s.date.slice(0, 7) !== d.month))
     fail(400, "日付と月が一致しません");
   await commit(c, d.month, d.revision, [
-    ...d.days.map((s) =>
-      c.env.DB.prepare(
-        "INSERT INTO calendar(date,closed,pattern,reason) VALUES(?,?,?,?) ON CONFLICT(date) DO UPDATE SET closed=excluded.closed,pattern=excluded.pattern,reason=excluded.reason",
-      ).bind(s.date, s.closed, s.pattern, s.reason),
-    ),
+    c.env.DB.prepare(
+      "INSERT INTO calendar(date,closed,pattern,reason) SELECT json_extract(value,'$.date'),json_extract(value,'$.closed'),json_extract(value,'$.pattern'),json_extract(value,'$.reason') FROM json_each(?) WHERE true ON CONFLICT(date) DO UPDATE SET closed=excluded.closed,pattern=excluded.pattern,reason=excluded.reason",
+    ).bind(JSON.stringify(d.days)),
     await audit(c, "calendar", d),
   ]);
-  return c.json({ ok: true });
+  return c.json({ ok: true, revision: d.revision + 1 });
 });
 app.post("/api/teacher/subjects", async (c) => {
   const d = await body(
@@ -656,11 +696,9 @@ app.post("/api/teacher/subjects", async (c) => {
     }),
   );
   await c.env.DB.batch([
-    ...d.subjects.map((s) =>
-      c.env.DB.prepare(
-        "UPDATE subjects SET subject=? WHERE pattern=? AND weekday=? AND period=?",
-      ).bind(s.subject, s.pattern, s.weekday, s.period),
-    ),
+    c.env.DB.prepare(
+      "INSERT INTO subjects(pattern,weekday,period,subject) SELECT json_extract(value,'$.pattern'),json_extract(value,'$.weekday'),json_extract(value,'$.period'),json_extract(value,'$.subject') FROM json_each(?) WHERE true ON CONFLICT(pattern,weekday,period) DO UPDATE SET subject=excluded.subject",
+    ).bind(JSON.stringify(d.subjects)),
     c.env.DB.prepare("UPDATE months SET revision=revision+1"),
     await audit(c, "subjects", d),
   ]);
@@ -682,7 +720,7 @@ app.post("/api/teacher/publication", async (c) => {
     ),
     await audit(c, "publication", d),
   ]);
-  return c.json({ ok: true });
+  return c.json({ ok: true, revision: d.revision + 1 });
 });
 app.get("/api/teacher/students", async (c) =>
   c.json(
@@ -701,15 +739,16 @@ app.post("/api/teacher/students", async (c) => {
     }),
   );
   const id = d.id ?? crypto.randomUUID();
-  if (
-    d.id &&
-    !(await c.env.DB.prepare("SELECT id FROM students WHERE id=?")
-      .bind(id)
-      .first())
-  )
-    fail(404, "生徒が見つかりません");
+  const studentGuard = crypto.randomUUID();
   try {
     await c.env.DB.batch([
+      ...(d.id
+        ? [
+            c.env.DB.prepare(
+              "INSERT INTO write_guards(id,ok) VALUES(?,EXISTS(SELECT 1 FROM students WHERE id=?))",
+            ).bind(studentGuard, id),
+          ]
+        : []),
       c.env.DB.prepare(
         "INSERT INTO students(id,name,yomi,active) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,yomi=excluded.yomi,active=excluded.active",
       ).bind(id, d.name, d.yomi, d.active),
@@ -718,17 +757,44 @@ app.post("/api/teacher/students", async (c) => {
         : []),
       c.env.DB.prepare("UPDATE months SET revision=revision+1"),
       await audit(c, "student", { ...d, id }),
+      ...(d.id
+        ? [
+            c.env.DB.prepare("DELETE FROM write_guards WHERE id=?").bind(
+              studentGuard,
+            ),
+          ]
+        : []),
     ]);
   } catch (e) {
+    if (String(e).includes("CHECK constraint"))
+      fail(404, "生徒が見つかりません");
     if (String(e).includes("UNIQUE"))
       fail(409, "その名前は既に登録されています");
     throw e;
   }
-  return c.json({ ok: true, id });
+  return c.json({
+    ok: true,
+    id,
+    student: { id, name: d.name, yomi: d.yomi, active: d.active },
+  });
+});
+app.get("/api/teacher/template", async (c) => {
+  const [state, templates, students] = await c.env.DB.batch([
+    c.env.DB.prepare("SELECT revision FROM template_state WHERE id=1"),
+    c.env.DB.prepare("SELECT * FROM attendance_templates"),
+    c.env.DB.prepare("SELECT * FROM students ORDER BY yomi,name"),
+  ]);
+  return c.json({
+    revision:
+      (state.results[0] as { revision: number } | undefined)?.revision ?? 0,
+    templates: templates.results,
+    students: students.results,
+  });
 });
 const templatesSchema = z.object({
-  month: monthSchema,
-  revision: z.number().int().nonnegative(),
+  month: monthSchema.optional(),
+  revision: z.number().int().nonnegative().optional(),
+  templateRevision: z.number().int().nonnegative(),
   studentId: z.string().min(1).max(100).optional(),
   generate: z.boolean().default(false),
   templates: z
@@ -745,52 +811,81 @@ app.post("/api/teacher/templates", async (c) => {
   const d = await body(c, templatesSchema);
   if (d.studentId && d.templates.some((t) => t.student_id !== d.studentId))
     fail(400, "生徒が一致しません");
-  const templates = JSON.stringify(d.templates);
+  if (d.generate && (!d.month || d.revision === undefined))
+    fail(400, "作成する月を指定してください");
+  const id = crypto.randomUUID();
   const queries: D1PreparedStatement[] = [
+    c.env.DB.prepare(
+      "INSERT INTO write_guards(id,ok) VALUES(?,EXISTS(SELECT 1 FROM template_state WHERE id=1 AND revision=?))",
+    ).bind(id, d.templateRevision),
+  ];
+  let monthGuard: Awaited<ReturnType<typeof guard>> | undefined;
+  if (d.generate) {
+    queries.push(
+      c.env.DB.prepare("INSERT OR IGNORE INTO months(month) VALUES(?)").bind(
+        d.month!,
+      ),
+    );
+    monthGuard = await guard(c, d.month!, d.revision!);
+    queries.push(monthGuard.first);
+  }
+  queries.push(
     d.studentId
       ? c.env.DB.prepare(
-          "DELETE FROM templates WHERE month=? AND student_id=?",
-        ).bind(d.month, d.studentId)
-      : c.env.DB.prepare("DELETE FROM templates WHERE month=?").bind(d.month),
+          "DELETE FROM attendance_templates WHERE student_id=?",
+        ).bind(d.studentId)
+      : c.env.DB.prepare("DELETE FROM attendance_templates"),
     c.env.DB.prepare(
-      "INSERT OR IGNORE INTO templates(month,student_id,weekday,period) SELECT ?,json_extract(value,'$.student_id'),json_extract(value,'$.weekday'),json_extract(value,'$.period') FROM json_each(?)",
-    ).bind(d.month, templates),
-  ];
+      "INSERT OR IGNORE INTO attendance_templates(student_id,weekday,period) SELECT json_extract(value,'$.student_id'),json_extract(value,'$.weekday'),json_extract(value,'$.period') FROM json_each(?)",
+    ).bind(JSON.stringify(d.templates)),
+  );
   if (d.generate) {
-    if (d.studentId)
-      queries.push(
-        c.env.DB.prepare(
-          "DELETE FROM reservations WHERE substr(date,1,7)=? AND student_id=?",
-        ).bind(d.month, d.studentId),
-      );
-    else
-      queries.push(
-        c.env.DB.prepare(
-          "DELETE FROM reservations WHERE substr(date,1,7)=?",
-        ).bind(d.month),
-      );
+    const first = d.month! + "-01",
+      end = monthOffset(d.month!, 1) + "-01";
     queries.push(
+      d.studentId
+        ? c.env.DB.prepare(
+            "DELETE FROM reservations WHERE student_id=? AND date>=? AND date<?",
+          ).bind(d.studentId, first, end)
+        : c.env.DB.prepare(
+            "DELETE FROM reservations WHERE date>=? AND date<?",
+          ).bind(first, end),
       c.env.DB.prepare(
-        `WITH RECURSIVE days(date) AS (SELECT ? UNION ALL SELECT date(date,'+1 day') FROM days WHERE date<date(?,'-1 day')) INSERT OR IGNORE INTO reservations(student_id,date,period) SELECT t.student_id,d.date,t.period FROM days d JOIN templates t ON t.month=? AND t.weekday=CAST(strftime('%w',d.date) AS INTEGER) JOIN students s ON s.id=t.student_id AND s.active=1 LEFT JOIN calendar c ON c.date=d.date WHERE strftime('%w',d.date)!='0' AND COALESCE(c.closed,0)=0 AND (? IS NULL OR t.student_id=?)`,
-      ).bind(
-        d.month + "-01",
-        monthOffset(d.month, 1) + "-01",
-        d.month,
-        d.studentId ?? null,
-        d.studentId ?? null,
-      ),
+        `WITH RECURSIVE days(date) AS (SELECT ? UNION ALL SELECT date(date,'+1 day') FROM days WHERE date<date(?,'-1 day')) INSERT OR IGNORE INTO reservations(student_id,date,period) SELECT t.student_id,d.date,t.period FROM days d JOIN attendance_templates t ON t.weekday=CAST(strftime('%w',d.date) AS INTEGER) JOIN students s ON s.id=t.student_id AND s.active=1 LEFT JOIN calendar c ON c.date=d.date WHERE strftime('%w',d.date)!='0' AND COALESCE(c.closed,0)=0 AND (? IS NULL OR t.student_id=?)`,
+      ).bind(first, end, d.studentId ?? null, d.studentId ?? null),
+      c.env.DB.prepare(
+        "UPDATE months SET revision=revision+1 WHERE month=?",
+      ).bind(d.month!),
+      monthGuard!.last,
     );
   }
   queries.push(
+    c.env.DB.prepare(
+      "UPDATE template_state SET revision=revision+1 WHERE id=1",
+    ),
     await audit(c, "templates", {
       month: d.month,
       studentId: d.studentId,
       generate: d.generate,
       count: d.templates.length,
     }),
+    c.env.DB.prepare("DELETE FROM write_guards WHERE id=?").bind(id),
   );
-  await commit(c, d.month, d.revision, queries);
-  return c.json({ ok: true });
+  try {
+    await c.env.DB.batch(queries);
+  } catch (e) {
+    if (String(e).includes("CHECK constraint"))
+      fail(
+        409,
+        "テンプレートまたは予定が更新されました。再読み込みしてください",
+      );
+    throw e;
+  }
+  return c.json({
+    ok: true,
+    templateRevision: d.templateRevision + 1,
+    revision: d.generate ? d.revision! + 1 : undefined,
+  });
 });
 app.get("/api/teacher/announcements", async (c) =>
   c.json(
@@ -806,13 +901,18 @@ app.post("/api/teacher/announcements", async (c) => {
     c,
     z.object({ text: z.string().trim().min(1).max(2000) }),
   );
+  const announcement = {
+    id: crypto.randomUUID(),
+    text: d.text,
+    created_at: new Date().toISOString(),
+  };
   await c.env.DB.batch([
     c.env.DB.prepare(
       "INSERT INTO announcements(id,text,created_at) VALUES(?,?,?)",
-    ).bind(crypto.randomUUID(), d.text, new Date().toISOString()),
+    ).bind(announcement.id, announcement.text, announcement.created_at),
     await audit(c, "announcement_add", d),
   ]);
-  return c.json({ ok: true });
+  return c.json({ ok: true, announcement });
 });
 app.post("/api/teacher/announcements/delete", async (c) => {
   const d = await body(c, z.object({ id: z.string().max(100) }));

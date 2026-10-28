@@ -33,7 +33,11 @@ export function useAction() {
   }
   return { busy, error, notice, setNotice, run };
 }
-export function useSchedule(initial = todayJst().slice(0, 7), enabled = true) {
+export function useSchedule(
+  initial = todayJst().slice(0, 7),
+  enabled = true,
+  scope = "all",
+) {
   const [month, setMonth] = useState(initial);
   const [data, setData] = useState<Schedule | null>(null);
   const [error, setError] = useState("");
@@ -44,7 +48,7 @@ export function useSchedule(initial = todayJst().slice(0, 7), enabled = true) {
     let current = true;
     setLoading(true);
     setError("");
-    api<Schedule>(`/api/${role}/schedule?month=${month}`)
+    api<Schedule>(`/api/${role}/schedule?month=${month}&scope=${scope}`)
       .then((d) => {
         if (current) setData(d);
       })
@@ -57,7 +61,7 @@ export function useSchedule(initial = todayJst().slice(0, 7), enabled = true) {
     return () => {
       current = false;
     };
-  }, [month, revision, enabled]);
+  }, [month, revision, enabled, scope]);
   return {
     month,
     setMonth,
@@ -65,16 +69,22 @@ export function useSchedule(initial = todayJst().slice(0, 7), enabled = true) {
     error,
     loading,
     refresh: () => refresh((v) => v + 1),
+    patch: (patch: Partial<Schedule>) =>
+      setData((current) =>
+        current?.month === month ? { ...current, ...patch } : current,
+      ),
   };
 }
 export function MonthSelect({
   month,
   onChange,
   past = false,
+  label = "表示する月",
 }: {
   month: string;
   onChange: (m: string) => void;
   past?: boolean;
+  label?: string;
 }) {
   const base = todayJst().slice(0, 7);
   const options = Array.from({ length: past ? 18 : 3 }, (_, i) =>
@@ -83,7 +93,7 @@ export function MonthSelect({
   if (!options.includes(month)) options.unshift(month);
   return (
     <label className="month-label">
-      表示する月{" "}
+      {label}{" "}
       <select value={month} onChange={(e) => onChange(e.target.value)}>
         {options.sort().map((m) => (
           <option key={m} value={m}>
@@ -186,6 +196,70 @@ export function useAttendanceTimeline(enabled: boolean, includeToday: boolean) {
       current = false;
     };
   }, [enabled, includeToday, limit, revision]);
+  function acknowledge(
+    month: string,
+    revision: number,
+    changes: {
+      studentId: string;
+      date: string;
+      period: number;
+      present: boolean;
+    }[],
+  ) {
+    const current = cache.current;
+    const old = current?.page.schedules[month];
+    if (!current || !old) return;
+    let weeklyCount = current.page.weeklyCount;
+    const reservations = new Map(
+      old.reservations.map((r) => [`${r.student_id}:${r.date}:${r.period}`, r]),
+    );
+    const counts = new Map(
+      old.counts.map((r) => [`${r.date}:${r.period}`, { ...r }]),
+    );
+    const weekStart = addDays(
+      current.page.today,
+      -((new Date(current.page.today + "T12:00:00Z").getUTCDay() + 6) % 7),
+    );
+    for (const change of changes) {
+      const key = `${change.studentId}:${change.date}:${change.period}`;
+      const was = reservations.has(key);
+      const delta = Number(change.present) - Number(was);
+      if (change.present)
+        reservations.set(key, {
+          student_id: change.studentId,
+          date: change.date,
+          period: change.period,
+        });
+      else reservations.delete(key);
+      const slot = `${change.date}:${change.period}`;
+      counts.set(slot, {
+        date: change.date,
+        period: change.period,
+        count: Math.max(0, (counts.get(slot)?.count ?? 0) + delta),
+      });
+      if (
+        role === "student" &&
+        change.date >= weekStart &&
+        change.date <= addDays(weekStart, 5)
+      )
+        weeklyCount += delta;
+    }
+    const page = {
+      ...current.page,
+      weeklyCount,
+      schedules: {
+        ...current.page.schedules,
+        [month]: {
+          ...old,
+          revision,
+          reservations: [...reservations.values()],
+          counts: [...counts.values()],
+        },
+      },
+    };
+    cache.current = { ...current, page };
+    setState(page);
+  }
   const base: Schedule | null = state
     ? {
         month: state.today.slice(0, 7),
@@ -208,7 +282,49 @@ export function useAttendanceTimeline(enabled: boolean, includeToday: boolean) {
     hasMore: state?.hasMore ?? false,
     loading,
     error,
+    acknowledge,
     loadMore: () => setLimit((v) => v + 14),
     refresh: () => setRevision((v) => v + 1),
   };
+}
+
+export function useTodayAttendance(enabled: boolean) {
+  const [data, setData] = useState<(Schedule & { weeklyCount: number }) | null>(
+    null,
+  );
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(enabled);
+  useEffect(() => {
+    if (!enabled) return;
+    let current = true;
+    api<AttendancePage>(`/api/student/attendance?from=${todayJst()}&limit=1`)
+      .then((page) => {
+        if (!current) return;
+        const today = page.today;
+        const schedule = page.schedules[today.slice(0, 7)];
+        setData({
+          month: today.slice(0, 7),
+          published: page.dates.includes(today),
+          revision: schedule?.revision ?? 0,
+          today,
+          calendar: schedule?.calendar ?? [],
+          reservations: schedule?.reservations ?? [],
+          counts: schedule?.counts ?? [],
+          students: page.students,
+          subjects: page.subjects,
+          templates: [],
+          weeklyCount: page.weeklyCount,
+        });
+      })
+      .catch((e) => {
+        if (current) setError(e.message);
+      })
+      .finally(() => {
+        if (current) setLoading(false);
+      });
+    return () => {
+      current = false;
+    };
+  }, [enabled]);
+  return { data, error, loading };
 }

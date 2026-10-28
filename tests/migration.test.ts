@@ -31,6 +31,31 @@ describe("旧日付の正規化", () => {
       ).pattern,
     ).toBe("temporary2");
   });
+  it("共通テンプレートは抽出時点の翌月を優先し月別原本も残す", () => {
+    const result = normalize(
+      snapshot([
+        {
+          path: "templates/base/default/202610/students/架空生徒",
+          data: { 月: ["1限"] },
+        },
+        {
+          path: "templates/base/default/202611/students/架空生徒",
+          data: { 火: ["2限"] },
+        },
+        {
+          path: "templates/base/default/202612/students/架空生徒",
+          data: { 水: ["3限"] },
+        },
+      ]),
+      "2026-07-28",
+    );
+    expect(result.tables.attendance_templates).toHaveLength(1);
+    expect(result.tables.attendance_templates[0]).toMatchObject({
+      weekday: 2,
+      period: 2,
+    });
+    expect(result.tables.templates).toHaveLength(3);
+  });
   it("親の月と一致しないレコードは推測せず停止", () => {
     expect(() =>
       normalize(
@@ -47,6 +72,7 @@ describe("旧日付の正規化", () => {
   it("全量置換は削除済み予約も消し、実SQLで再実行可能", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(readFileSync("migrations/0001_initial.sql", "utf8"));
+    db.exec(readFileSync("migrations/0002_shared_template.sql", "utf8"));
     const initial = normalize(snapshot(), "2026-07-28");
     db.exec(toSql(initial));
     db.exec(toSql(initial));
@@ -62,6 +88,7 @@ describe("旧日付の正規化", () => {
   it("予約重複と失敗途中のバッチをDBが防止", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(readFileSync("migrations/0001_initial.sql", "utf8"));
+    db.exec(readFileSync("migrations/0002_shared_template.sql", "utf8"));
     db.exec(toSql(normalize(snapshot(), "2026-07-28")));
     const row = db.prepare("SELECT * FROM reservations").get()!;
     expect(() =>

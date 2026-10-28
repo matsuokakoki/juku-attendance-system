@@ -22,6 +22,8 @@ export function normalize(snapshot, since) {
     calendar: [],
     subjects: [],
     templates: [],
+    attendance_templates: [],
+    template_state: [{ id: 1, revision: 0 }],
     reservations: [],
     announcements: [],
     login_events: [],
@@ -201,8 +203,32 @@ export function normalize(snapshot, since) {
     warnings.push(
       "Legacy access logs contain dates only; preserved source dates and assigned noon JST. Exact login times cannot be recovered.",
     );
+  const exportMonth = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Tokyo",
+    year: "numeric",
+    month: "2-digit",
+  }).format(new Date(snapshot.exportedAt));
+  const nextMonth = new Date(exportMonth + "-01T12:00:00Z");
+  nextMonth.setUTCMonth(nextMonth.getUTCMonth() + 1);
+  const preferred = nextMonth.toISOString().slice(0, 7);
+  const templateMonth = tables.templates.some((row) => row.month === preferred)
+    ? preferred
+    : tables.templates
+        .map((row) => row.month)
+        .sort()
+        .at(-1);
+  tables.attendance_templates = tables.templates
+    .filter((row) => row.month === templateMonth)
+    .map(({ student_id, weekday, period }) => ({
+      student_id,
+      weekday,
+      period,
+    }));
+  warnings.push(
+    `Shared template initialized from ${templateMonth ?? "empty"}; monthly source retained for reconciliation.`,
+  );
   return {
-    version: 1,
+    version: 2,
     since,
     sourceExportedAt: snapshot.exportedAt,
     tables,
@@ -226,6 +252,8 @@ export function toSql(normalized) {
   for (const table of [
     "reservations",
     "templates",
+    "attendance_templates",
+    "template_state",
     "calendar",
     "months",
     "subjects",

@@ -229,6 +229,8 @@ test("月生成はテンプレートから原子的に作成し重複しない",
   const id = await login(request, "teacher");
   const m = monthOffset(month, 2);
   let d = await schedule(request, m);
+  const templateRevision = async () =>
+    (await (await request.get("/api/teacher/template")).json()).revision;
   const templates = [{ student_id: "demo-yamada", weekday: 1, period: 2 }];
   expect(
     (
@@ -236,6 +238,7 @@ test("月生成はテンプレートから原子的に作成し重複しない",
         month: m,
         revision: d.revision,
         templates,
+        templateRevision: await templateRevision(),
         generate: true,
       })
     ).status(),
@@ -255,6 +258,7 @@ test("月生成はテンプレートから原子的に作成し重複しない",
     month: m,
     revision: d.revision,
     templates,
+    templateRevision: await templateRevision(),
     generate: true,
   });
   expect((await schedule(request, m)).reservations).toHaveLength(count);
@@ -527,7 +531,12 @@ for (const role of ["student", "teacher"] as const) {
       `**/api/${role}/${role === "student" ? "cancellations" : "reservations"}`,
       (route) => {
         saved.push(route.request().postDataJSON());
-        return route.fulfill({ json: { ok: true } });
+        return route.fulfill({
+          json: {
+            ok: true,
+            revision: route.request().postDataJSON().revision + 1,
+          },
+        });
       },
     );
     let firstLabel = "";
@@ -648,4 +657,182 @@ test("日付ページAPIは先生3日・生徒14日だけ返し、非公開月�
   ).json()) as AttendancePage;
   expect(hidden.dates).toEqual([]);
   expect(hidden.schedules).toEqual({});
+});
+
+test("共通テンプレートは月に依存せず、既存予定を変えずに保存し競合を拒否", async ({
+  request,
+}) => {
+  const teacher = await login(request, "teacher");
+  const read = async () =>
+    await (await request.get("/api/teacher/template")).json();
+  const before = await read();
+  const current = await schedule(request, month);
+  const templates = [{ student_id: "demo-yamada", weekday: 2, period: 3 }];
+  const saved = await post(request, "/api/teacher/templates", teacher, {
+    templateRevision: before.revision,
+    templates,
+    generate: false,
+  });
+  expect(saved.ok()).toBe(true);
+  const latest = await read();
+  expect(latest.templates).toEqual(templates);
+  expect((await schedule(request, month)).reservations).toEqual(
+    current.reservations,
+  );
+  const stale = await post(request, "/api/teacher/templates", teacher, {
+    templateRevision: before.revision,
+    templates: [],
+    generate: false,
+  });
+  expect(stale.status()).toBe(409);
+  expect((await read()).templates).toEqual(templates);
+  const target = monthOffset(month, 5);
+  const targetBefore = await schedule(request, target);
+  const generated = await post(request, "/api/teacher/templates", teacher, {
+    templateRevision: latest.revision,
+    month: target,
+    revision: targetBefore.revision,
+    templates,
+    generate: true,
+  });
+  expect(generated.ok()).toBe(true);
+  const rows = (await schedule(request, target)).reservations;
+  expect(rows.length).toBeGreaterThan(0);
+  expect(
+    rows.every(
+      (r) =>
+        weekday(r.date) === 2 &&
+        r.period === 3 &&
+        r.student_id === "demo-yamada",
+    ),
+  ).toBe(true);
+  const afterGenerate = await read();
+  const conflict = await post(request, "/api/teacher/templates", teacher, {
+    templateRevision: afterGenerate.revision,
+    month: target,
+    revision: targetBefore.revision,
+    templates: [],
+    generate: true,
+  });
+  expect(conflict.status()).toBe(409);
+  expect((await read()).templates).toEqual(templates);
+  expect((await schedule(request, target)).reservations).toEqual(rows);
+});
+
+test("管理画面用の取得は予約を含めず、保存後の応答に確定値を返す", async ({
+  request,
+}) => {
+  const teacher = await login(request, "teacher");
+  const name = "架空の追加生徒" + Date.now();
+  for (const scope of ["calendar", "subjects", "publication"]) {
+    const data = await (
+      await request.get(`/api/teacher/schedule?month=${month}&scope=${scope}`)
+    ).json();
+    expect(data.reservations).toEqual([]);
+    expect(data.templates).toEqual([]);
+    expect(data.students).toEqual([]);
+  }
+  const created = await (
+    await post(request, "/api/teacher/students", teacher, {
+      name,
+      yomi: "かくう",
+      active: 1,
+    })
+  ).json();
+  expect(created.student.name).toBe(name);
+  const hidden = await (
+    await post(request, "/api/teacher/students", teacher, {
+      ...created.student,
+      active: 0,
+    })
+  ).json();
+  expect(hidden.student.active).toBe(0);
+  const announcement = await (
+    await post(request, "/api/teacher/announcements", teacher, {
+      text: "確認用のお知らせ",
+    })
+  ).json();
+  expect(announcement.announcement.text).toBe("確認用のお知らせ");
+  expect(
+    (
+      await post(request, "/api/teacher/announcements/delete", teacher, {
+        id: announcement.announcement.id,
+      })
+    ).ok(),
+  ).toBe(true);
+});
+
+test("共通テンプレートの画面は月を変えても同じ編集内容で、保存後に全体を再取得しない", async ({
+  page,
+}) => {
+  await page.goto("/teachertop_final.html");
+  await page
+    .getByLabel("パスワード", { exact: true })
+    .fill(secrets.TEACHER_PASSWORD);
+  await page.getByRole("button", { name: "ログイン", exact: true }).click();
+  let loads = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/teacher/template") loads++;
+  });
+  await page.goto("/teacher_nextmonth_template.html");
+  const checkbox = page.getByLabel("山田 月 1限", { exact: true });
+  await expect(checkbox).toBeVisible();
+  const checked = await checkbox.isChecked();
+  await checkbox.setChecked(!checked);
+  await page.getByLabel("出席を作成する月").selectOption(monthOffset(month, 2));
+  await expect(checkbox).toBeChecked({ checked: !checked });
+  await page
+    .getByRole("button", { name: "共通テンプレートを保存", exact: true })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "共通テンプレートを保存しました",
+  );
+  expect(loads).toBe(1);
+  await checkbox.setChecked(checked);
+  await page
+    .getByRole("button", { name: "共通テンプレートを保存", exact: true })
+    .click();
+  await expect(page.getByRole("status")).toContainText(
+    "共通テンプレートを保存しました",
+  );
+  expect(loads).toBe(1);
+});
+
+test("休講日と科目は保存しても全体再取得せず、次の変更も保存できる", async ({
+  page,
+}) => {
+  await page.goto("/teachertop_final.html");
+  await page
+    .getByLabel("パスワード", { exact: true })
+    .fill(secrets.TEACHER_PASSWORD);
+  await page.getByRole("button", { name: "ログイン", exact: true }).click();
+  let loads = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/teacher/schedule") loads++;
+  });
+  await page.goto("/kyuukoubi.html");
+  const reason = page.getByLabel(todayJst() + "の休講理由", { exact: true });
+  await expect(reason).toBeVisible();
+  await expect(reason).toBeEnabled();
+  const original = await reason.inputValue();
+  await reason.fill("確認用");
+  await page.getByRole("button", { name: "✓ 保存する", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("保存しました");
+  expect(loads).toBe(1);
+  await reason.fill(original);
+  await page.getByRole("button", { name: "✓ 保存する", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("保存しました");
+  expect(loads).toBe(1);
+  await page.goto("/subject_editor.html");
+  const subject = page.getByLabel("通常 月 1限", { exact: true });
+  await expect(subject).toBeVisible();
+  const value = await subject.inputValue();
+  await subject.fill("確認用科目");
+  await page.getByRole("button", { name: "✓ 保存する", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("保存しました");
+  expect(loads).toBe(2);
+  await subject.fill(value);
+  await page.getByRole("button", { name: "✓ 保存する", exact: true }).click();
+  await expect(page.getByRole("status")).toContainText("保存しました");
+  expect(loads).toBe(2);
 });

@@ -1,5 +1,5 @@
 import DOMPurify from "dompurify";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api } from "./api";
 import { path, teacherMenu, pageTitle } from "./config";
 import {
@@ -224,6 +224,7 @@ function TeacherAttendance({ past = false }: { past?: boolean }) {
                     (groups[entry[0].split(":")[1].slice(0, 7)] ??= []).push(
                       entry,
                     );
+                  let savedReservations = d.reservations;
                   try {
                     for (const [month, entries] of Object.entries(groups)) {
                       let revision = (past ? d : timeline.schedules[month])
@@ -234,20 +235,56 @@ function TeacherAttendance({ past = false }: { past?: boolean }) {
                         offset += 300
                       ) {
                         const batch = entries!.slice(offset, offset + 300);
-                        await api("/api/teacher/reservations", {
-                          month,
-                          revision,
-                          changes: batch.map(([key, present]) => {
-                            const [studentId, date, period] = key.split(":");
-                            return {
-                              studentId,
-                              date,
-                              period: Number(period),
-                              present,
-                            };
-                          }),
+                        const result = await api<{ revision: number }>(
+                          "/api/teacher/reservations",
+                          {
+                            month,
+                            revision,
+                            changes: batch.map(([key, present]) => {
+                              const [studentId, date, period] = key.split(":");
+                              return {
+                                studentId,
+                                date,
+                                period: Number(period),
+                                present,
+                              };
+                            }),
+                          },
+                        );
+                        revision = result.revision;
+                        const savedChanges = batch.map(([key, present]) => {
+                          const [studentId, date, period] = key.split(":");
+                          return {
+                            studentId,
+                            date,
+                            period: Number(period),
+                            present,
+                          };
                         });
-                        revision += 1;
+                        if (past) {
+                          const rows = new Map(
+                            savedReservations.map((row) => [
+                              `${row.student_id}:${row.date}:${row.period}`,
+                              row,
+                            ]),
+                          );
+                          for (const row of savedChanges) {
+                            const key = `${row.studentId}:${row.date}:${row.period}`;
+                            if (row.present)
+                              rows.set(key, {
+                                student_id: row.studentId,
+                                date: row.date,
+                                period: row.period,
+                              });
+                            else rows.delete(key);
+                          }
+                          savedReservations = [...rows.values()];
+                          s.patch({
+                            reservations: savedReservations,
+                            revision,
+                          });
+                        } else
+                          timeline.acknowledge(month, revision, savedChanges);
                         setChanges((current) =>
                           Object.fromEntries(
                             Object.entries(current).filter(
@@ -258,8 +295,9 @@ function TeacherAttendance({ past = false }: { past?: boolean }) {
                         );
                       }
                     }
-                  } finally {
+                  } catch (error) {
                     refresh();
+                    throw error;
                   }
                   a.setNotice("✓ 保存しました");
                 })
@@ -318,7 +356,7 @@ function TeacherAttendance({ past = false }: { past?: boolean }) {
   );
 }
 function CalendarEditor({ patterns = false }: { patterns?: boolean }) {
-  const s = useSchedule();
+  const s = useSchedule(undefined, true, "calendar");
   const [days, setDays] = useState<CalendarDay[]>([]);
   const a = useAction();
   useEffect(() => {
@@ -361,6 +399,7 @@ function CalendarEditor({ patterns = false }: { patterns?: boolean }) {
                 <td>
                   {patterns ? (
                     <select
+                      disabled={a.busy}
                       aria-label={d.date + "の科目"}
                       value={d.pattern}
                       onChange={(e) =>
@@ -375,6 +414,7 @@ function CalendarEditor({ patterns = false }: { patterns?: boolean }) {
                     </select>
                   ) : (
                     <input
+                      disabled={a.busy}
                       aria-label={d.date + "を休講にする"}
                       type="checkbox"
                       checked={d.closed === 1}
@@ -387,6 +427,7 @@ function CalendarEditor({ patterns = false }: { patterns?: boolean }) {
                 {!patterns && (
                   <td>
                     <input
+                      disabled={a.busy}
                       aria-label={d.date + "の休講理由"}
                       value={d.reason}
                       maxLength={200}
@@ -405,13 +446,25 @@ function CalendarEditor({ patterns = false }: { patterns?: boolean }) {
         disabled={a.busy || !s.data || s.loading}
         onClick={() =>
           void a.run(async () => {
-            await api("/api/teacher/calendar", {
-              month: s.month,
-              revision: s.data!.revision,
-              days,
+            const changed = days.filter((day) => {
+              const old = s.data!.calendar.find(
+                (row) => row.date === day.date,
+              ) ?? {
+                date: day.date,
+                closed: 0,
+                pattern: "default",
+                reason: "",
+              };
+              return JSON.stringify(old) !== JSON.stringify(day);
             });
+            if (changed.length) {
+              const result = await api<{ revision: number }>(
+                "/api/teacher/calendar",
+                { month: s.month, revision: s.data!.revision, days: changed },
+              );
+              s.patch({ revision: result.revision, calendar: days });
+            }
             a.setNotice("✓ 保存しました");
-            s.refresh();
           })
         }
       >
@@ -422,7 +475,7 @@ function CalendarEditor({ patterns = false }: { patterns?: boolean }) {
   );
 }
 function Subjects() {
-  const s = useSchedule();
+  const s = useSchedule(undefined, true, "subjects");
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [pattern, setPattern] = useState<Pattern>("default");
   const a = useAction();
@@ -435,6 +488,7 @@ function Subjects() {
       <label>
         編集対象{" "}
         <select
+          disabled={a.busy}
           value={pattern}
           onChange={(e) => setPattern(e.target.value as Pattern)}
         >
@@ -470,6 +524,7 @@ function Subjects() {
                 {[1, 2, 3, 4, 5, 6].map((period) => (
                   <td key={period}>
                     <input
+                      disabled={a.busy}
                       aria-label={`${labels[pattern]} ${weekdays[day]} ${period}限`}
                       list="subject-options"
                       maxLength={40}
@@ -504,9 +559,20 @@ function Subjects() {
         disabled={a.busy || !subjects.length}
         onClick={() =>
           void a.run(async () => {
-            await api("/api/teacher/subjects", { subjects });
+            const changed = subjects.filter(
+              (row) =>
+                s.data!.subjects.find(
+                  (old) =>
+                    old.pattern === row.pattern &&
+                    old.weekday === row.weekday &&
+                    old.period === row.period,
+                )?.subject !== row.subject,
+            );
+            if (changed.length) {
+              await api("/api/teacher/subjects", { subjects: changed });
+              s.patch({ subjects, revision: s.data!.revision + 1 });
+            }
             a.setNotice("✓ 保存しました");
-            s.refresh();
           })
         }
       >
@@ -535,13 +601,20 @@ function Students() {
         onSubmit={(e) => {
           e.preventDefault();
           void a.run(async () => {
-            await api("/api/teacher/students", {
-              name: newName,
-              yomi: "",
-              active: 1,
-            });
+            const result = await api<{ student: Student }>(
+              "/api/teacher/students",
+              {
+                name: newName,
+                yomi: "",
+                active: 1,
+              },
+            );
             setNewName("");
-            await load();
+            setStudents((current) =>
+              [...current, result.student].sort((a, b) =>
+                (a.yomi || a.name).localeCompare(b.yomi || b.name, "ja"),
+              ),
+            );
             a.setNotice("✓ 生徒を追加しました");
           });
         }}
@@ -549,6 +622,7 @@ function Students() {
         <label>
           追加する生徒名
           <input
+            disabled={a.busy}
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             required
@@ -572,6 +646,7 @@ function Students() {
               <tr key={s.id}>
                 <td>
                   <input
+                    disabled={a.busy}
                     aria-label={s.name + "の名前"}
                     value={s.name}
                     maxLength={50}
@@ -580,6 +655,7 @@ function Students() {
                 </td>
                 <td>
                   <input
+                    disabled={a.busy}
                     aria-label={s.name + "の読み"}
                     value={s.yomi}
                     maxLength={100}
@@ -592,9 +668,16 @@ function Students() {
                     disabled={a.busy}
                     onClick={() =>
                       void a.run(async () => {
-                        await api("/api/teacher/students", s);
+                        const result = await api<{ student: Student }>(
+                          "/api/teacher/students",
+                          s,
+                        );
+                        setStudents((current) =>
+                          current.map((row) =>
+                            row.id === s.id ? result.student : row,
+                          ),
+                        );
                         a.setNotice("✓ 保存しました");
-                        await load();
                       })
                     }
                   >
@@ -612,11 +695,18 @@ function Students() {
                         )
                       )
                         void a.run(async () => {
-                          await api("/api/teacher/students", {
-                            ...s,
-                            active: s.active ? 0 : 1,
-                          });
-                          await load();
+                          const result = await api<{ student: Student }>(
+                            "/api/teacher/students",
+                            {
+                              ...s,
+                              active: s.active ? 0 : 1,
+                            },
+                          );
+                          setStudents((current) =>
+                            current.map((row) =>
+                              row.id === s.id ? result.student : row,
+                            ),
+                          );
                           a.setNotice("✓ 更新しました");
                         });
                     }}
@@ -638,22 +728,38 @@ function Templates({ individual = false }: { individual?: boolean }) {
     individual
       ? todayJst().slice(0, 7)
       : monthOffset(todayJst().slice(0, 7), 1),
+    true,
+    "publication",
   );
   const [templates, setTemplates] = useState<Template[]>([]);
+  const [data, setData] = useState<{
+    revision: number;
+    templates: Template[];
+    students: Student[];
+  } | null>(null);
   const [studentId, setStudentId] = useState("");
   const a = useAction();
   useEffect(() => {
-    if (s.data) {
-      setTemplates(s.data.templates);
-      setStudentId(
-        (v) => v || s.data!.students.find((st) => st.active)?.id || "",
-      );
-    }
-  }, [s.data]);
+    void a.run(async () => {
+      const result = await api<{
+        revision: number;
+        templates: Template[];
+        students: Student[];
+      }>("/api/teacher/template");
+      setData(result);
+      setTemplates(result.templates);
+      setStudentId(result.students.find((st) => st.active)?.id ?? "");
+    });
+  }, []);
   const students =
-    s.data?.students.filter(
+    data?.students.filter(
       (st) => st.active && (!individual || st.id === studentId),
     ) ?? [];
+  const checked = useMemo(
+    () =>
+      new Set(templates.map((t) => `${t.student_id}:${t.weekday}:${t.period}`)),
+    [templates],
+  );
   function toggle(st: string, weekday: number, period: number) {
     setTemplates((v) =>
       v.some(
@@ -675,36 +781,57 @@ function Templates({ individual = false }: { individual?: boolean }) {
     if (
       generate &&
       !confirm(
-        "この月の出席予定をテンプレートから作成します。対象の登録内容は置き換わります。よろしいですか？",
+        "共通テンプレートからこの月の出席予定を作成します。対象の登録内容は置き換わります。よろしいですか？",
       )
     )
       return;
     await a.run(async () => {
-      await api("/api/teacher/templates", {
-        month: s.month,
-        revision: s.data!.revision,
-        ...(individual ? { studentId } : {}),
-        generate,
-        templates: individual
-          ? templates.filter((t) => t.student_id === studentId)
-          : templates,
-      });
-      a.setNotice("✓ テンプレートと出席予定を保存しました");
-      s.refresh();
+      const result = await api<{ templateRevision: number; revision?: number }>(
+        "/api/teacher/templates",
+        {
+          templateRevision: data!.revision,
+          ...(generate ? { month: s.month, revision: s.data!.revision } : {}),
+          ...(individual ? { studentId } : {}),
+          generate,
+          templates: individual
+            ? templates.filter((t) => t.student_id === studentId)
+            : templates,
+        },
+      );
+      setData((current) =>
+        current
+          ? { ...current, revision: result.templateRevision, templates }
+          : current,
+      );
+      if (generate) s.patch({ revision: result.revision });
+      a.setNotice(
+        generate
+          ? "✓ 共通テンプレートを保存し、この月の出席予定を作成しました"
+          : "✓ 共通テンプレートを保存しました",
+      );
     });
   }
   return (
     <>
-      <h1>{individual ? "テンプレ個別編集" : "新規出席作成（月に一度）"}</h1>
-      <MonthSelect past month={s.month} onChange={s.setMonth} />
+      <h1>{individual ? "テンプレ個別編集" : "共通テンプレート・出席作成"}</h1>
+      <p className="muted">
+        テンプレートは共通で1つです。保存しても作成済みの予定は変わりません。
+      </p>
+      <MonthSelect
+        past
+        label="出席を作成する月"
+        month={s.month}
+        onChange={s.setMonth}
+      />
       {individual && (
         <label>
           生徒{" "}
           <select
+            disabled={a.busy}
             value={studentId}
             onChange={(e) => setStudentId(e.target.value)}
           >
-            {s.data?.students
+            {data?.students
               .filter((s) => s.active)
               .map((st) => (
                 <option key={st.id} value={st.id}>
@@ -714,23 +841,6 @@ function Templates({ individual = false }: { individual?: boolean }) {
           </select>
         </label>
       )}
-      <button
-        className="secondary"
-        disabled={a.busy || s.loading}
-        onClick={() =>
-          void a.run(async () => {
-            const prev = await api<Schedule>(
-              "/api/teacher/schedule?month=" + monthOffset(s.month, -1),
-            );
-            setTemplates(prev.templates);
-            a.setNotice(
-              "前月のテンプレートを読み込みました。保存すると反映されます",
-            );
-          })
-        }
-      >
-        前月を読み込む
-      </button>
       <ErrorBox error={s.error} />
       <div className="table-wrap">
         <table className="template-table">
@@ -759,14 +869,10 @@ function Templates({ individual = false }: { individual?: boolean }) {
                   return (
                     <td key={i}>
                       <input
+                        disabled={a.busy}
                         type="checkbox"
                         aria-label={`${st.name} ${weekdays[day]} ${period}限`}
-                        checked={templates.some(
-                          (t) =>
-                            t.student_id === st.id &&
-                            t.weekday === day &&
-                            t.period === period,
-                        )}
+                        checked={checked.has(`${st.id}:${day}:${period}`)}
                         onChange={() => toggle(st.id, day, period)}
                       />
                     </td>
@@ -780,18 +886,22 @@ function Templates({ individual = false }: { individual?: boolean }) {
       <div className="actions">
         <button
           disabled={
-            a.busy || !s.data || s.loading || (individual && !studentId)
+            a.busy ||
+            !data ||
+            !s.data ||
+            s.loading ||
+            (individual && !studentId)
           }
           onClick={() => void save(true)}
         >
-          ✓ {individual ? "変更を出席予定に反映" : "次月テンプレと出席を保存"}
+          ✓ {individual ? "変更を出席予定に反映" : "この月の出席を作成"}
         </button>
         <button
           className="secondary"
-          disabled={a.busy || !s.data || s.loading}
+          disabled={a.busy || !data || (individual && !studentId)}
           onClick={() => void save(false)}
         >
-          テンプレートのみ保存
+          共通テンプレートを保存
         </button>
       </div>
       <Status a={a} />
@@ -799,7 +909,7 @@ function Templates({ individual = false }: { individual?: boolean }) {
   );
 }
 function Publication() {
-  const s = useSchedule();
+  const s = useSchedule(undefined, true, "publication");
   const a = useAction();
   return (
     <>
@@ -815,12 +925,18 @@ function Publication() {
             disabled={a.busy}
             onClick={() =>
               void a.run(async () => {
-                await api("/api/teacher/publication", {
-                  month: s.month,
-                  revision: s.data!.revision,
+                const result = await api<{ revision: number }>(
+                  "/api/teacher/publication",
+                  {
+                    month: s.month,
+                    revision: s.data!.revision,
+                    published: !s.data!.published,
+                  },
+                );
+                s.patch({
+                  revision: result.revision,
                   published: !s.data!.published,
                 });
-                s.refresh();
                 a.setNotice("✓ 公開設定を保存しました");
               })
             }
@@ -849,9 +965,14 @@ function Announcements() {
         onSubmit={(e) => {
           e.preventDefault();
           void a.run(async () => {
-            await api("/api/teacher/announcements", { text });
+            const result = await api<{ announcement: Announcement }>(
+              "/api/teacher/announcements",
+              { text },
+            );
             setText("");
-            await load();
+            setRows((current) =>
+              [result.announcement, ...current].slice(0, 200),
+            );
             a.setNotice("✓ お知らせを追加しました");
           });
         }}
@@ -879,7 +1000,9 @@ function Announcements() {
               if (confirm("このお知らせを削除しますか？"))
                 void a.run(async () => {
                   await api("/api/teacher/announcements/delete", { id: r.id });
-                  await load();
+                  setRows((current) =>
+                    current.filter((row) => row.id !== r.id),
+                  );
                 });
             }}
           >

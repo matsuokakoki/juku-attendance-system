@@ -29,7 +29,7 @@ import "./style.css";
 import { path, teacher, role, rootPage } from "./config";
 import {
   useAction,
-  useSchedule,
+  useTodayAttendance,
   useAttendanceTimeline,
   ErrorBox,
   Status,
@@ -191,7 +191,7 @@ function StudentSchedule({
   identity: Identity;
   todayOnly?: boolean;
 }) {
-  const s = useSchedule(undefined, todayOnly);
+  const s = useTodayAttendance(todayOnly);
   const timeline = useAttendanceTimeline(!todayOnly, false);
   const [pending, setPending] = useState<Set<string>>(new Set());
   const a = useAction();
@@ -211,9 +211,7 @@ function StudentSchedule({
   const error = todayOnly ? s.error : timeline.error;
   const weekStart = addDays(today, -((weekday(today) + 6) % 7));
   const count = todayOnly
-    ? (d?.reservations.filter(
-        (r) => r.date >= weekStart && r.date <= addDays(weekStart, 5),
-      ).length ?? 0)
+    ? (s.data?.weeklyCount ?? 0)
     : timeline.weeklyCount -
       [...pending].filter(
         (key) =>
@@ -348,14 +346,30 @@ function StudentSchedule({
                             for (const [month, keys] of Object.entries(
                               groups,
                             )) {
-                              await api("/api/student/cancellations", {
+                              const result = await api<{ revision: number }>(
+                                "/api/student/cancellations",
+                                {
+                                  month,
+                                  revision: timeline.schedules[month].revision,
+                                  changes: keys!.map((key) => {
+                                    const [date, period] = key.split(":");
+                                    return { date, period: Number(period) };
+                                  }),
+                                },
+                              );
+                              timeline.acknowledge(
                                 month,
-                                revision: timeline.schedules[month].revision,
-                                changes: keys!.map((key) => {
+                                result.revision,
+                                keys.map((key) => {
                                   const [date, period] = key.split(":");
-                                  return { date, period: Number(period) };
+                                  return {
+                                    studentId: identity.studentId!,
+                                    date,
+                                    period: Number(period),
+                                    present: false,
+                                  };
                                 }),
-                              });
+                              );
                               setPending(
                                 (current) =>
                                   new Set(
@@ -365,8 +379,9 @@ function StudentSchedule({
                                   ),
                               );
                             }
-                          } finally {
-                            if (pending.size) timeline.refresh();
+                          } catch (error) {
+                            timeline.refresh();
+                            throw error;
                           }
                           a.setNotice("✓ 出席内容を保存しました");
                         });

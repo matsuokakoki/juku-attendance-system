@@ -11,3 +11,7 @@
 - Record schema changes as migrations. Keep production maintenance enabled until the scheduled final snapshot, reconciliation and cutover are complete.
 - Run npm run check and npm run test:e2e after substantive changes. Build before starting the preview server; restart preview after a build if asset watching is unavailable.
 - Update docs/verification.md with what was actually verified. Do not describe a preview deployment as the completed production cutover.
+
+- Attendance templates are a single shared master in attendance_templates, protected by template_state.revision. Month selection only chooses the reservation generation target. Saving the master alone must never alter existing reservations.
+- Future attendance uses date pages: teachers initially 3 days, students 14 days; both append 14. Student today reads one day. Preserve publication filtering and original revision guards across appended pages.
+- Apply confirmed write responses to the loaded UI; do not re-download the whole timeline after successful saves. Refresh and preserve outstanding edits on conflict/failure.
