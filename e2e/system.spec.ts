@@ -8,6 +8,7 @@ import {
   monthDates,
   type Identity,
   type Schedule,
+  type AttendancePage,
 } from "../shared/domain";
 const secrets = Object.fromEntries(
   readFileSync(".dev.vars", "utf8")
@@ -444,21 +445,27 @@ test("公開済みの未来月は3か月先以降も取得・取消できる", a
 });
 
 for (const role of ["student", "teacher"] as const) {
-  test(`${role}: 月をまたいで14日ずつ追加し取得済み月を再取得しない`, async ({
+  test(`${role}: 必要な日付だけ取得し月をまたいで追加する`, async ({
     page,
   }) => {
     const base = month;
     const next = monthOffset(base, 1);
     const far = monthOffset(base, 3);
-    const requests: Record<string, number> = {};
-    await page.route(`**/api/${role}/schedule-months`, (route) =>
-      route.fulfill({ json: { months: [base, next, far] } }),
-    );
-    await page.route(`**/api/${role}/schedule?*`, (route) => {
-      const m = new URL(route.request().url()).searchParams.get("month")!;
-      requests[m] = (requests[m] ?? 0) + 1;
-      return route.fulfill({
-        json: {
+    const requestedDates: string[] = [];
+    const requests: { limit: number; masters: string }[] = [];
+    await page.route(`**/api/${role}/attendance?*`, (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      const from = query.get("from")!;
+      const limit = Number(query.get("limit"));
+      requests.push({ limit, masters: query.get("masters")! });
+      const all = [base, next, far]
+        .flatMap(monthDates)
+        .filter((date) => date >= from);
+      const dates = all.slice(0, limit);
+      requestedDates.push(...dates);
+      const schedules: Record<string, Schedule> = {};
+      for (const m of new Set(dates.map((date) => date.slice(0, 7)))) {
+        schedules[m] = {
           month: m,
           today: todayJst(),
           published: true,
@@ -467,16 +474,26 @@ for (const role of ["student", "teacher"] as const) {
           subjects: [],
           counts: [],
           templates: [],
-          students: [
-            { id: "demo-yamada", name: "山田", yomi: "やまだ", active: 1 },
-          ],
-          reservations: monthDates(m).map((date) => ({
-            student_id: "demo-yamada",
-            date,
-            period: 1,
-          })),
-        },
-      });
+          students: [],
+          reservations: dates
+            .filter((date) => date.slice(0, 7) === m)
+            .map((date) => ({ student_id: "demo-yamada", date, period: 1 })),
+        };
+      }
+      const body: AttendancePage = {
+        dates,
+        next: dates.length ? addDays(dates.at(-1)!, 1) : null,
+        hasMore: all.length > limit,
+        schedules,
+        today: todayJst(),
+        weeklyCount: 5,
+        students:
+          query.get("masters") === "1"
+            ? [{ id: "demo-yamada", name: "山田", yomi: "やまだ", active: 1 }]
+            : [],
+        subjects: [],
+      };
+      return route.fulfill({ json: body });
     });
     await page.goto(
       role === "student" ? "/login.html" : "/teachertop_final.html",
@@ -503,7 +520,8 @@ for (const role of ["student", "teacher"] as const) {
         ? ".student-schedule tbody tr"
         : ".attendance-table tbody tr",
     );
-    await expect(rows).toHaveCount(14);
+    const initial = role === "teacher" ? 3 : 14;
+    await expect(rows).toHaveCount(initial);
     const saved: { month: string; changes: unknown[] }[] = [];
     await page.route(
       `**/api/${role}/${role === "student" ? "cancellations" : "reservations"}`,
@@ -527,21 +545,24 @@ for (const role of ["student", "teacher"] as const) {
     }
     await expect(page.getByLabel("表示する月")).toHaveCount(0);
     await page.getByRole("button", { name: "もっと見る（2週間分）" }).click();
-    await expect(rows).toHaveCount(28);
-    for (let i = 0; i < 5; i++) {
-      const more = page.getByRole("button", { name: "もっと見る（2週間分）" });
-      if (!(await more.count())) break;
-      await more.click();
-      await expect(
-        page
-          .getByRole("status", { name: "" })
-          .filter({ hasText: "読み込み中" }),
-      ).toHaveCount(0);
+    await expect(rows).toHaveCount(initial + 14);
+    const total = [base, next, far]
+      .flatMap(monthDates)
+      .filter((date) =>
+        role === "teacher" ? date >= todayJst() : date > todayJst(),
+      ).length;
+    for (let i = 0; i < 6 && (await rows.count()) < total; i++) {
+      const before = await rows.count();
+      await page.getByRole("button", { name: "もっと見る（2週間分）" }).click();
+      await expect(rows).toHaveCount(Math.min(total, before + 14));
     }
-    expect(requests[base]).toBe(1);
-    expect(requests[next]).toBe(1);
-    expect(requests[monthOffset(base, 2)]).toBeUndefined();
-    expect(requests[far]).toBe(1);
+    expect(requests[0]).toEqual({ limit: initial, masters: "1" });
+    expect(requests.slice(1).every((r) => r.masters === "0")).toBe(true);
+    expect(
+      requestedDates.some((date) => date.startsWith(monthOffset(base, 2))),
+    ).toBe(false);
+    expect(requestedDates.some((date) => date.startsWith(far))).toBe(true);
+    expect(new Set(requestedDates).size).toBe(requestedDates.length);
     if (role === "student") {
       await expect(
         page.getByRole("button", {
@@ -572,3 +593,59 @@ for (const role of ["student", "teacher"] as const) {
     expect(saved.every((batch) => batch.changes.length === 1)).toBe(true);
   });
 }
+
+test("日付ページAPIは先生3日・生徒14日だけ返し、非公開月と他人の予約を除外", async ({
+  request,
+}) => {
+  await login(request, "teacher");
+  const first = await request.get("/api/teacher/attendance");
+  expect(first.ok()).toBe(true);
+  const teacher = (await first.json()) as AttendancePage;
+  expect(teacher.dates).toHaveLength(3);
+  expect(teacher.dates[0]).toBe(todayJst());
+  expect(teacher.students.length).toBeGreaterThan(0);
+  for (const schedule of Object.values(teacher.schedules)) {
+    expect(schedule.templates).toEqual([]);
+    expect(
+      schedule.reservations.every((r) => teacher.dates.includes(r.date)),
+    ).toBe(true);
+  }
+  const next = (await (
+    await request.get(
+      `/api/teacher/attendance?from=${teacher.next}&limit=14&masters=0`,
+    )
+  ).json()) as AttendancePage;
+  expect(next.dates).toHaveLength(14);
+  expect(next.dates.some((date) => teacher.dates.includes(date))).toBe(false);
+  expect(next.students).toEqual([]);
+  expect(next.subjects).toEqual([]);
+  expect((await request.get("/api/teacher/attendance?limit=15")).status()).toBe(
+    400,
+  );
+  const student = await login(request, "student");
+  const own = (await (
+    await request.get("/api/student/attendance")
+  ).json()) as AttendancePage;
+  expect(own.dates).toHaveLength(14);
+  expect(own.dates[0]).toBe(addDays(todayJst(), 1));
+  expect(
+    Object.values(own.schedules)
+      .flatMap((s) => s.reservations)
+      .every((r) => r.student_id === student.studentId),
+  ).toBe(true);
+  expect(own.students).toHaveLength(1);
+  expect(
+    (
+      await request.get(
+        "/api/student/attendance?from=" + addDays(todayJst(), -1),
+      )
+    ).status(),
+  ).toBe(403);
+  const hidden = (await (
+    await request.get(
+      "/api/student/attendance?from=" + monthOffset(month, 4) + "-01",
+    )
+  ).json()) as AttendancePage;
+  expect(hidden.dates).toEqual([]);
+  expect(hidden.schedules).toEqual({});
+});

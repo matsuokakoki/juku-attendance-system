@@ -13,6 +13,10 @@ import {
 } from "../shared/validation";
 import {
   monthDates,
+  addDays,
+  weekday,
+  type AttendancePage,
+  type Schedule,
   teacherSessionExpires,
   todayJst,
   monthOffset,
@@ -360,6 +364,138 @@ async function readSchedule(c: Context<AppEnv>, teacher: boolean) {
     templates: templates.results,
   });
 }
+async function readAttendancePage(c: Context<AppEnv>, teacher: boolean) {
+  const today = todayJst();
+  const from = dateSchema.parse(
+    c.req.query("from") ?? (teacher ? today : addDays(today, 1)),
+  );
+  if (from < today) fail(403, "過去の予定はこの一覧では取得できません");
+  const limit = z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(14)
+    .parse(c.req.query("limit") ?? (teacher ? 3 : 14));
+  const masters = c.req.query("masters") !== "0";
+  const identity = c.get("identity");
+  const available = (
+    await c.env.DB.prepare(
+      "SELECT month FROM months WHERE published=1 AND month>=? ORDER BY month",
+    )
+      .bind(from.slice(0, 7))
+      .all<{ month: string }>()
+  ).results;
+  // Stop date generation as soon as the page and one lookahead day are known.
+  const candidates: string[] = [];
+  for (const { month } of available) {
+    for (const date of monthDates(month)) {
+      if (date >= from) candidates.push(date);
+      if (candidates.length > limit) break;
+    }
+    if (candidates.length > limit) break;
+  }
+  const planned = candidates.slice(0, limit);
+  const datesJson = JSON.stringify(planned);
+  const monthsJson = JSON.stringify([
+    ...new Set(planned.map((date) => date.slice(0, 7))),
+  ]);
+  const chosen = " AND r.date IN (SELECT value FROM json_each(?)) ";
+  const first = planned[0] ?? from;
+  const end = addDays(planned.at(-1) ?? from, 1);
+  const publishedJoin =
+    " JOIN months m ON m.month=substr(r.date,1,7) AND m.published=1 ";
+  const weekStart = addDays(today, -((weekday(today) + 6) % 7));
+  const [meta, calendar, reservations, counts, students, subjects, weekly] =
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "SELECT month,published,revision FROM months WHERE month IN (SELECT value FROM json_each(?)) AND published=1",
+      ).bind(monthsJson),
+      c.env.DB.prepare(
+        "SELECT r.* FROM calendar r" +
+          publishedJoin +
+          "WHERE r.date>=? AND r.date<?" +
+          chosen +
+          "ORDER BY r.date",
+      ).bind(first, end, datesJson),
+      teacher
+        ? c.env.DB.prepare(
+            "SELECT r.* FROM reservations r JOIN students s ON s.id=r.student_id" +
+              publishedJoin +
+              "WHERE r.date>=? AND r.date<? AND s.active=1" +
+              chosen,
+          ).bind(first, end, datesJson)
+        : c.env.DB.prepare(
+            "SELECT r.* FROM reservations r" +
+              publishedJoin +
+              "WHERE r.student_id=? AND r.date>=? AND r.date<?" +
+              chosen,
+          ).bind(identity.studentId, first, end, datesJson),
+      c.env.DB.prepare(
+        "SELECT r.date,r.period,count(*) AS count FROM reservations r JOIN students s ON s.id=r.student_id" +
+          publishedJoin +
+          "WHERE r.date>=? AND r.date<? AND s.active=1" +
+          chosen +
+          "GROUP BY r.date,r.period",
+      ).bind(first, end, datesJson),
+      !masters
+        ? c.env.DB.prepare("SELECT * FROM students WHERE 0")
+        : teacher
+          ? c.env.DB.prepare("SELECT * FROM students ORDER BY yomi,name")
+          : c.env.DB.prepare("SELECT * FROM students WHERE id=?").bind(
+              identity.studentId,
+            ),
+      c.env.DB.prepare(
+        masters ? "SELECT * FROM subjects" : "SELECT * FROM subjects WHERE 0",
+      ),
+      teacher
+        ? c.env.DB.prepare("SELECT 0 AS count")
+        : c.env.DB.prepare(
+            "SELECT count(*) AS count FROM reservations r" +
+              publishedJoin +
+              "WHERE r.student_id=? AND r.date>=? AND r.date<=?",
+          ).bind(identity.studentId, weekStart, addDays(weekStart, 5)),
+    ]);
+  const schedules: Record<string, Schedule> = {};
+  for (const row of meta.results as {
+    month: string;
+    published: number;
+    revision: number;
+  }[]) {
+    schedules[row.month] = {
+      month: row.month,
+      published: true,
+      revision: row.revision,
+      today,
+      calendar: (calendar.results as CalendarDay[]).filter(
+        (r) => r.date.slice(0, 7) === row.month,
+      ),
+      reservations: (reservations.results as Reservation[]).filter(
+        (r) => r.date.slice(0, 7) === row.month,
+      ),
+      counts: (counts.results as Schedule["counts"]).filter(
+        (r) => r.date.slice(0, 7) === row.month,
+      ),
+      subjects: [],
+      students: [],
+      templates: [],
+    };
+  }
+  const result: AttendancePage = {
+    today,
+    dates: planned.filter((date) => !!schedules[date.slice(0, 7)]),
+    next: planned.length ? end : null,
+    hasMore: candidates.length > limit,
+    schedules,
+    weeklyCount: Number(
+      (weekly.results[0] as { count: number } | undefined)?.count ?? 0,
+    ),
+    students: students.results as Student[],
+    subjects: subjects.results as Subject[],
+  };
+  return c.json(result);
+}
+app.get("/api/student/attendance", (c) => readAttendancePage(c, false));
+app.get("/api/teacher/attendance", (c) => readAttendancePage(c, true));
 async function publishedScheduleMonths(c: Context<AppEnv>) {
   const rows = await c.env.DB.prepare(
     "SELECT month FROM months WHERE published=1 AND month>=? ORDER BY month",

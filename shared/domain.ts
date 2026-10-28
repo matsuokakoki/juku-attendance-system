@@ -40,6 +40,16 @@ export type Schedule = {
   students: Student[];
   templates: Template[];
 };
+export type AttendancePage = {
+  dates: string[];
+  next: string | null;
+  hasMore: boolean;
+  schedules: Record<string, Schedule>;
+  today: string;
+  weeklyCount: number;
+  students: Student[];
+  subjects: Subject[];
+};
 export function todayJst(now = new Date()): string {
   return new Intl.DateTimeFormat("sv-SE", {
     timeZone: "Asia/Tokyo",

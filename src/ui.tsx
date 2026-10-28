@@ -4,7 +4,8 @@ import { role } from "./config";
 import {
   todayJst,
   monthOffset,
-  monthDates,
+  addDays,
+  type AttendancePage,
   type Schedule,
 } from "../shared/domain";
 export function ErrorBox({ error }: { error: string }) {
@@ -106,20 +107,15 @@ export function Status({ a }: { a: ReturnType<typeof useAction> }) {
   );
 }
 
-// Month payloads are cached; expanding the list only fetches newly needed months.
+// Keep loaded date ranges; only the next visible page is transferred.
 export function useAttendanceTimeline(enabled: boolean, includeToday: boolean) {
-  const [limit, setLimit] = useState(14);
+  const initial = role === "teacher" ? 3 : 14;
+  const [limit, setLimit] = useState(initial);
   const [revision, setRevision] = useState(0);
-  const [schedules, setSchedules] = useState<Record<string, Schedule>>({});
-  const [dates, setDates] = useState<string[]>([]);
-  const [hasMore, setHasMore] = useState(false);
+  const [state, setState] = useState<AttendancePage | null>(null);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState("");
-  const cache = useRef<{
-    revision: number;
-    months: string[];
-    schedules: Record<string, Schedule>;
-  } | null>(null);
+  const cache = useRef<{ revision: number; page: AttendancePage } | null>(null);
   useEffect(() => {
     if (!enabled) return;
     let current = true;
@@ -127,35 +123,57 @@ export function useAttendanceTimeline(enabled: boolean, includeToday: boolean) {
     setError("");
     async function load() {
       const previous =
-        cache.current?.revision === revision ? cache.current : null;
-      const months =
-        previous?.months ??
-        (await api<{ months: string[] }>(`/api/${role}/schedule-months`))
-          .months;
-      if (!current) return;
+        cache.current?.revision === revision ? cache.current.page : null;
       const today = todayJst();
-      const allDates = months
-        .flatMap(monthDates)
-        .filter((date) => (includeToday ? date >= today : date > today));
-      const nextDates = allDates.slice(0, limit);
-      const next = { ...(previous?.schedules ?? {}) };
-      const needed = [
-        ...new Set([
-          today.slice(0, 7),
-          ...nextDates.map((date) => date.slice(0, 7)),
-        ]),
-      ].filter((month) => !next[month]);
-      const loaded = await Promise.all(
-        needed.map((month) =>
-          api<Schedule>(`/api/${role}/schedule?month=${month}`),
-        ),
-      );
-      for (const schedule of loaded) next[schedule.month] = schedule;
+      let combined: AttendancePage = previous ?? {
+        dates: [],
+        next: includeToday ? today : addDays(today, 1),
+        hasMore: true,
+        schedules: {},
+        today,
+        weeklyCount: 0,
+        students: [],
+        subjects: [],
+      };
+      let first = !previous;
+      while (
+        combined.hasMore &&
+        combined.next &&
+        combined.dates.length < limit
+      ) {
+        const size = Math.min(14, limit - combined.dates.length);
+        const page = await api<AttendancePage>(
+          `/api/${role}/attendance?from=${combined.next}&limit=${size}&masters=${first ? 1 : 0}`,
+        );
+        if (!current) return;
+        const schedules = { ...combined.schedules };
+        const students = first ? page.students : combined.students;
+        const subjects = first ? page.subjects : combined.subjects;
+        for (const [month, data] of Object.entries(page.schedules)) {
+          const old = schedules[month];
+          // Retain the original revision: older edited rows must still detect conflicts.
+          schedules[month] = {
+            ...data,
+            revision: old?.revision ?? data.revision,
+            students,
+            subjects,
+            calendar: [...(old?.calendar ?? []), ...data.calendar],
+            reservations: [...(old?.reservations ?? []), ...data.reservations],
+            counts: [...(old?.counts ?? []), ...data.counts],
+          };
+        }
+        combined = {
+          ...page,
+          dates: [...combined.dates, ...page.dates],
+          schedules,
+          students,
+          subjects,
+        };
+        first = false;
+      }
       if (!current) return;
-      cache.current = { revision, months, schedules: next };
-      setSchedules(next);
-      setDates(nextDates.filter((date) => next[date.slice(0, 7)]?.published));
-      setHasMore(allDates.length > limit);
+      cache.current = { revision, page: combined };
+      setState(combined);
     }
     void load()
       .catch((e) => {
@@ -168,10 +186,26 @@ export function useAttendanceTimeline(enabled: boolean, includeToday: boolean) {
       current = false;
     };
   }, [enabled, includeToday, limit, revision]);
+  const base: Schedule | null = state
+    ? {
+        month: state.today.slice(0, 7),
+        published: true,
+        revision: 0,
+        today: state.today,
+        calendar: [],
+        reservations: [],
+        counts: [],
+        templates: [],
+        students: state.students,
+        subjects: state.subjects,
+      }
+    : null;
   return {
-    schedules,
-    dates,
-    hasMore,
+    schedules: state?.schedules ?? {},
+    dates: state?.dates ?? [],
+    base,
+    weeklyCount: state?.weeklyCount ?? 0,
+    hasMore: state?.hasMore ?? false,
     loading,
     error,
     loadMore: () => setLimit((v) => v + 14),

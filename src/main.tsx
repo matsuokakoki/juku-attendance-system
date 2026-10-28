@@ -204,19 +204,22 @@ function StudentSchedule({
     window.addEventListener("beforeunload", fn);
     return () => window.removeEventListener("beforeunload", fn);
   }, [pending]);
-  const d = todayOnly ? s.data : timeline.schedules[todayJst().slice(0, 7)];
+  const d = todayOnly ? s.data : timeline.base;
   const today = d?.today ?? todayJst();
   const dates = todayOnly ? [today] : timeline.dates;
   const loading = todayOnly ? s.loading : timeline.loading;
   const error = todayOnly ? s.error : timeline.error;
   const weekStart = addDays(today, -((weekday(today) + 6) % 7));
-  const count =
-    d?.reservations.filter(
-      (r) =>
-        r.date >= weekStart &&
-        r.date <= addDays(weekStart, 5) &&
-        !pending.has(r.date + ":" + r.period),
-    ).length ?? 0;
+  const count = todayOnly
+    ? (d?.reservations.filter(
+        (r) => r.date >= weekStart && r.date <= addDays(weekStart, 5),
+      ).length ?? 0)
+    : timeline.weeklyCount -
+      [...pending].filter(
+        (key) =>
+          key.slice(0, 10) >= weekStart &&
+          key.slice(0, 10) <= addDays(weekStart, 5),
+      ).length;
   function toggle(key: string) {
     setPending((v) => {
       const next = new Set(v);

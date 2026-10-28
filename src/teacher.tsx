@@ -103,17 +103,19 @@ function TeacherAttendance({ past = false }: { past?: boolean }) {
     setChanges({});
     setVisible(14);
   }, [s.month]);
-  const d = past ? s.data : timeline.schedules[todayJst().slice(0, 7)];
+  const d = past ? s.data : timeline.base;
   const refresh = past ? s.refresh : timeline.refresh;
   const loading = past ? s.loading : timeline.loading;
   const active = d?.students.filter((x) => x.active === 1) ?? [];
+  const registered = new Set(
+    (past
+      ? (d?.reservations ?? [])
+      : Object.values(timeline.schedules).flatMap((data) => data.reservations)
+    ).map((r) => `${r.student_id}:${r.date}:${r.period}`),
+  );
   const present = (studentId: string, date: string, period: number) =>
     changes[`${studentId}:${date}:${period}`] ??
-    (past ? d : timeline.schedules[date.slice(0, 7)])?.reservations.some(
-      (r) =>
-        r.student_id === studentId && r.date === date && r.period === period,
-    ) ??
-    false;
+    registered.has(`${studentId}:${date}:${period}`);
   const dates = past ? monthDates(s.month).slice(0, visible) : timeline.dates;
   return (
     <>
