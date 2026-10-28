@@ -26,6 +26,20 @@
     "head_sampling_rate": 0.1,
   },
   "env": {
+    "real-preview": {
+      "name": "juku-attendance-system-real-preview",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "juku-attendance-real-preview",
+          "database_id": "4916b10d-cca7-470c-817d-97e9a571e7ab",
+          "migrations_dir": "migrations",
+        },
+      ],
+      "vars": {
+        "ENVIRONMENT": "real-preview",
+      },
+    },
     "production": {
       "name": "juku-attendance-system",
       "d1_databases": [

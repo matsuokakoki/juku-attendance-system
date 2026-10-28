@@ -8,6 +8,10 @@
 - [検証用先生メニュー](https://juku-attendance-system-staging.ikki-juku.workers.dev/teachertop_final.html)
 - 本番用の新アプリはメンテナンス中です。旧Firebase Hosting・旧Firestoreへの本番切替は未実施です。
 
+## 実データの確認用環境
+
+[実データ確認用ログイン](https://juku-attendance-system-real-preview.ikki-juku.workers.dev/login.html) / [先生画面](https://juku-attendance-system-real-preview.ikki-juku.workers.dev/teachertop_final.html)。初回移行データを独立したDBへコピーしています。ログインは従来の苗字と共通パスワードです。この環境での変更は旧システムや本番DBに反映されません。旧システムとの自動同期もありません。検証用の架空データとは別環境です。
+
 ## 引き継ぐ運用
 
 - 生徒は苗字と従来の共通パスワードでログイン。入力内容はサーバー側で検証します。

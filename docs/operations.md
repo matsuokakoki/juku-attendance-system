@@ -5,6 +5,7 @@
 2026-10-28時点で、旧Firestoreからの初回抽出・正規化と、新設D1への初回移行を実施しました。旧システムは継続稼働中です。切替日時は未定です。
 
 - 検証Worker: `juku-attendance-system-staging`、DBは架空データ。
+- 実データ確認Worker: `juku-attendance-system-real-preview`。初回移行した本番D1の業務データを独立DBへコピー。認証セッションはコピーせず、この環境専用に発行する。旧Firestore・本番D1・架空データの検証D1とは独立し、自動同期はしない。
 - 本番Worker: `juku-attendance-system`、初回移行済みDBに接続。`MAINTENANCE=true`。
 - Firebase: `juku-attendance`。旧Hostingと旧Rulesはまだ変更していません。
 - 本番の先生用合言葉はCloudflare Secretへ設定。日本時間の翌日0時で認証期限が切れます。
@@ -58,3 +59,9 @@ node scripts/prepare-cutover.mjs https://juku-attendance-system.ikki-juku.worker
 コード・設定・SQLマイグレーションをGitに残し、検証用環境でテストします。MCP上で変更したスキーマだけを残さないでください。D1のマイグレーション履歴も管理します。CLIでのクラウド操作には初回の認証が必要です。通常はCloudflare・Firebase・GitHubプラグインで操作でき、不足する機能だけ公式CLIを使います。
 
 本番へのデプロイは `npm run deploy:production`、検証用は `npm run deploy`。本番メンテ解除は、上記の最終移行と照合が完了してから設定を明示的に変更します。通常のデプロイで勝手に解除しません。
+
+## 実データ確認用環境
+
+2026-10-28、初回移行済みの本番D1から読取りのみで生徒・予約・カレンダー・科目・テンプレート・お知らせ・旧ログイン記録・サイト本文・日付対応をコピーしました。元の旧Firestore抽出日時は2026-10-28 01:21 JSTです。新DBは `juku-attendance-real-preview`、DB IDは `4916b10d-cca7-470c-817d-97e9a571e7ab`。対象予約4,810件の集合一致と全業務テーブルの件数一致を確認しました。スキーマ初期値の科目は新設確認用DBだけで置換し、本番D1は変更していません。
+
+デプロイは `npm run deploy:real-preview`。SecretsはこのWorkerにも別途設定し、セッション用Secretは本番とは別にします。確認環境での取消や先生の編集はこのDBのみに保存され、本番切替時の移行元には使用しません。サイトは検索エンジン向けにnoindexを返しますが、認証は本体のAPIで実施します。本番のメンテ解除や旧URLの転送は行っていません。

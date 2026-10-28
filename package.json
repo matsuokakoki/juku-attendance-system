@@ -20,7 +20,8 @@
     "setup": "node scripts/setup-dev.mjs",
     "export:legacy": "node scripts/export-firestore.mjs",
     "dev:api": "node scripts/wrangler.mjs dev --port 8787",
-    "deploy:production": "npm run build && node scripts/wrangler.mjs deploy --env production"
+    "deploy:production": "npm run build && node scripts/wrangler.mjs deploy --env production",
+    "deploy:real-preview": "npm run build && node scripts/wrangler.mjs deploy --env real-preview"
   },
   "dependencies": {
     "dompurify": "3.4.17",
