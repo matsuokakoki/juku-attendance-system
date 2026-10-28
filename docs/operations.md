@@ -41,7 +41,7 @@ SQL出力は移行対象の全量置換用です。削除された予約も反�
 転送用の設定は次のコマンドで準備できます。**このコマンドだけではデプロイされません。**
 
 ```sh
-node scripts/prepare-cutover.mjs https://juku-attendance-system.juku-matsuokakoki.workers.dev
+node scripts/prepare-cutover.mjs https://juku-attendance-system.ikki-juku.workers.dev
 ```
 
 `private/cutover/` にHosting設定と旧DB停止用Rulesを出力します。保存した旧設定と組み合わせ、Firebaseプラグインまたは公式CLIで適用します。書込み停止をHosting切替だけで代用しないでください。

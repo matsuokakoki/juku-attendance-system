@@ -4,8 +4,8 @@
 
 ## 現在の公開先
 
-- [検証用ログイン](https://juku-attendance-system-staging.juku-matsuokakoki.workers.dev/login.html) — 架空の「山田」「佐藤」のデータのみ。パスワードは運用者に確認してください。
-- [検証用先生メニュー](https://juku-attendance-system-staging.juku-matsuokakoki.workers.dev/teachertop_final.html)
+- [検証用ログイン](https://juku-attendance-system-staging.ikki-juku.workers.dev/login.html) — 架空の「山田」「佐藤」のデータのみ。パスワードは運用者に確認してください。
+- [検証用先生メニュー](https://juku-attendance-system-staging.ikki-juku.workers.dev/teachertop_final.html)
 - 本番用の新アプリはメンテナンス中です。旧Firebase Hosting・旧Firestoreへの本番切替は未実施です。
 
 ## 引き継ぐ運用
