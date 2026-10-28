@@ -1,6 +1,15 @@
 import { describe, it, expect } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import {
+  readFileSync,
+  writeFileSync,
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+} from "node:fs";
+import { execFileSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 // Migration tooling is plain Node so the same source runs without a TS build.
 // @ts-expect-error the migration module intentionally has no build dependency
 import { normalize, toSql } from "../scripts/normalize.mjs";
@@ -55,6 +64,39 @@ describe("旧日付の正規化", () => {
       period: 2,
     });
     expect(result.tables.templates).toHaveLength(3);
+  });
+  it("移行差分を共通テンプレートとログイン履歴まで比較できる", () => {
+    const directory = mkdtempSync(join(tmpdir(), "juku-diff-test-"));
+    try {
+      mkdirSync(join(directory, "private"));
+      const before = snapshot();
+      const after = snapshot([
+        {
+          path: "templates/base/default/202611/students/架空生徒",
+          data: { 火: ["2限"] },
+        },
+      ]);
+      writeFileSync(join(directory, "before.json"), JSON.stringify(before));
+      writeFileSync(join(directory, "after.json"), JSON.stringify(after));
+      execFileSync(
+        process.execPath,
+        [
+          resolve("scripts/compare-snapshots.mjs"),
+          join(directory, "before.json"),
+          join(directory, "after.json"),
+          "2026-07-28",
+        ],
+        { cwd: directory },
+      );
+      const report = JSON.parse(
+        readFileSync(join(directory, "private/diff-report.json"), "utf8"),
+      );
+      expect(report.attendance_templates.added).toBe(1);
+      expect(report.template_state.added).toBe(0);
+      expect(report.login_events).toEqual({ added: 0, changed: 0, deleted: 0 });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
   it("親の月と一致しないレコードは推測せず停止", () => {
     expect(() =>
