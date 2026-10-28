@@ -226,6 +226,41 @@ function StudentSchedule({
       return next;
     });
   }
+  function renderSlot(date: string, period: number) {
+    if (!d) return null;
+    const info = slotInfo(date, period, d.calendar, d.subjects);
+    const mine = d.reservations.some(
+      (r) => r.date === date && r.period === period,
+    );
+    const key = date + ":" + period;
+    const cancelled = pending.has(key);
+    const count =
+      d.counts.find((r) => r.date === date && r.period === period)?.count ?? 0;
+    const text = info.closed ? "休み" : info.study ? "自習のみ" : info.subject;
+    return (
+      <button
+        type="button"
+        key={period}
+        className={`slot ${info.closed ? "rest" : info.study ? "study" : mine && !cancelled ? "active" : ""}`}
+        disabled={todayOnly || !mine || info.closed || info.study || a.busy}
+        aria-pressed={mine && !cancelled}
+        aria-label={`${date} ${period}限 ${text}${mine ? " 登録済み" : ""}${cancelled ? " 取消予定" : ""}`}
+        onClick={() => toggle(key)}
+      >
+        {todayOnly && <span>{period}限</span>}
+        <strong>{text}</strong>
+        {!info.closed && !info.study && (
+          <small>
+            残{Math.max(0, info.capacity - count + (cancelled ? 1 : 0))}席
+          </small>
+        )}
+        <b>{mine ? (cancelled ? "✕" : "〇") : ""}</b>
+      </button>
+    );
+  }
+  function dateLabel(date: string) {
+    return `${Number(date.slice(5, 7))}/${Number(date.slice(8))}（${weekdays[weekday(date)]}）`;
+  }
   return (
     <>
       <h1>
@@ -249,67 +284,46 @@ function StudentSchedule({
         ) : (
           <>
             <p className="summary">あなたの今週のコマ：{count}コマ</p>
-            {dates.map((date) => (
-              <section
-                className={`day-card${todayOnly ? " day-card-today" : ""}`}
-                key={date}
-              >
-                <h2>
-                  {Number(date.slice(5, 7))}/{Number(date.slice(8))}（
-                  {weekdays[weekday(date)]}）
-                </h2>
+            {todayOnly ? (
+              <section className="day-card day-card-today">
+                <h2>{dateLabel(today)}</h2>
                 <div className="slots">
-                  {Array.from({ length: 6 }, (_, i) => i + 1).map((period) => {
-                    const info = slotInfo(date, period, d.calendar, d.subjects);
-                    const mine = d.reservations.some(
-                      (r) => r.date === date && r.period === period,
-                    );
-                    const key = date + ":" + period;
-                    const cancelled = pending.has(key);
-                    const count =
-                      d.counts.find(
-                        (r) => r.date === date && r.period === period,
-                      )?.count ?? 0;
-                    const text = info.closed
-                      ? "休み"
-                      : info.study
-                        ? "自習のみ"
-                        : info.subject;
-                    return (
-                      <button
-                        type="button"
-                        key={period}
-                        className={`slot ${info.closed ? "rest" : info.study ? "study" : mine && !cancelled ? "active" : ""}`}
-                        disabled={
-                          todayOnly ||
-                          !mine ||
-                          info.closed ||
-                          info.study ||
-                          a.busy
-                        }
-                        aria-pressed={mine && !cancelled}
-                        aria-label={`${date} ${period}限 ${text}${mine ? " 登録済み" : ""}${cancelled ? " 取消予定" : ""}`}
-                        onClick={() => toggle(key)}
-                      >
-                        <span>{period}限</span>
-                        <strong>{text}</strong>
-                        {!info.closed && !info.study && (
-                          <small>
-                            残
-                            {Math.max(
-                              0,
-                              info.capacity - count + (cancelled ? 1 : 0),
-                            )}
-                            席
-                          </small>
-                        )}
-                        <b>{mine ? (cancelled ? "✕" : "〇") : ""}</b>
-                      </button>
-                    );
-                  })}
+                  {Array.from({ length: 6 }, (_, i) =>
+                    renderSlot(today, i + 1),
+                  )}
                 </div>
               </section>
-            ))}
+            ) : (
+              <div
+                className="table-wrap student-schedule-wrap"
+                tabIndex={0}
+                role="region"
+                aria-label="月別の出席予定。横にスクロールできます"
+              >
+                <table className="student-schedule" aria-label="月別の出席予定">
+                  <thead>
+                    <tr>
+                      <th scope="col">日付</th>
+                      {Array.from({ length: 6 }, (_, i) => (
+                        <th scope="col" key={i}>
+                          {i + 1}限
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {dates.map((date) => (
+                      <tr key={date}>
+                        <th scope="row">{dateLabel(date)}</th>
+                        {Array.from({ length: 6 }, (_, i) => (
+                          <td key={i}>{renderSlot(date, i + 1)}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
             {!todayOnly && (
               <>
                 {visible <

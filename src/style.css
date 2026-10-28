@@ -463,3 +463,66 @@ footer {
     flex-direction: column;
   }
 }
+
+.student-schedule-wrap {
+  max-width: 100%;
+}
+.student-schedule {
+  min-width: 640px;
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+.student-schedule th,
+.student-schedule td {
+  border: 0;
+  border-right: 1px solid #d5dbe2;
+  border-bottom: 1px solid #d5dbe2;
+  padding: 0;
+}
+.student-schedule thead th {
+  padding: 14px 6px;
+  background: white;
+  font-size: 16px;
+}
+.student-schedule th:first-child {
+  position: sticky;
+  left: 0;
+  width: 82px;
+  z-index: 1;
+  background: #e2e2e2;
+  color: #24364b;
+  padding: 10px 5px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+.student-schedule .slot {
+  width: 100%;
+  min-height: 94px;
+  height: 100%;
+  border-radius: 0;
+  border: 2px solid transparent;
+  gap: 0;
+  padding: 8px 4px;
+  overflow-wrap: anywhere;
+  font-size: 15px;
+  line-height: 1.4;
+}
+.student-schedule .slot.active {
+  border-color: #74c493;
+}
+.student-schedule .slot.rest {
+  background: #ffdddd;
+  color: #d71920;
+}
+.student-schedule .slot.study {
+  background: #e2e2e2;
+  color: #595959;
+}
+.student-schedule .slot small {
+  font-size: 14px;
+}
+.student-schedule .slot b {
+  min-height: 21px;
+}
