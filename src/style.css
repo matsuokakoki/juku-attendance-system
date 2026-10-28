@@ -244,6 +244,39 @@ textarea {
 .slot b {
   min-height: 20px;
 }
+.day-card-today {
+  max-width: 680px;
+  margin-inline: auto;
+}
+.day-card-today .slots {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+.day-card-today .slot {
+  min-height: 64px;
+  flex-direction: row;
+  gap: 16px;
+  padding: 14px 18px;
+  border-radius: 4px;
+  border: 1px solid #d5dbe2;
+  font-size: 18px;
+}
+.day-card-today .slot small {
+  font-size: 14px;
+}
+.day-card-today .slot b:empty {
+  display: none;
+}
+.day-card-today .slot.rest {
+  background: #ffdddd;
+  color: #d71920;
+  border-color: #efbfc2;
+}
+.day-card-today .slot.study {
+  background: #e2e2e2;
+  color: #595959;
+  border-color: #cecece;
+}
 .fixed-bar {
   position: fixed;
   bottom: 0;

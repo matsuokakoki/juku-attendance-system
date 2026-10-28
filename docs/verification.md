@@ -24,3 +24,7 @@
 ## サブドメイン変更
 
 2026-10-28、利用者がCloudflare管理画面でアカウントのWorkersサブドメインを `ikki-juku.workers.dev` へ変更。`ikki` は使用済みだった。HTTPS反映後、検証用先生画面・本番ログインHTML・本番休講日APIのHTTP 200とJSON形式を確認。本番の認証対象APIは503で、メンテナンス継続を確認した。READMEと切替手順のURL、未デプロイの転送設定を更新。旧Firebaseの配信・Firestoreは変更していない。
+
+## 本日の出席の縦表示
+
+2026-10-28、本日の出席画面を1限〜6限の横長行による縦並びへ変更。休みは赤系、自習のみは灰色、登録済みは緑を使う。月別画面と閲覧専用の権限は維持。型検査・ビルド・Vitest 13件・Playwright 14件成功。ブラウザテストは `/private/tmp/juku-browsers` のChromiumを使用し、macOSのサンドボックス外で実行。検証Workerへ反映し、架空生徒のログインと本日画面の実配信を確認。本番Worker・旧Firebaseへの反映は未実施。

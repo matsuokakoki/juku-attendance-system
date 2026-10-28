@@ -250,7 +250,10 @@ function StudentSchedule({
           <>
             <p className="summary">あなたの今週のコマ：{count}コマ</p>
             {dates.map((date) => (
-              <section className="day-card" key={date}>
+              <section
+                className={`day-card${todayOnly ? " day-card-today" : ""}`}
+                key={date}
+              >
                 <h2>
                   {Number(date.slice(5, 7))}/{Number(date.slice(8))}（
                   {weekdays[weekday(date)]}）
